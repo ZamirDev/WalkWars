@@ -6,7 +6,7 @@ import { LeafletMap, type LeafletMapHandle } from '@/components/LeafletMap';
 import { useAuth } from '@/lib/auth-context';
 import { colorForOwner } from '@/lib/colors';
 import { createTerritory, queryTerritoriesForTrail, queryTerritoriesInArea } from '@/lib/db';
-import { haversine, isClosedLoop, simplifyRing, type LatLng } from '@/lib/geo';
+import { haversine, isClosedLoop, polygonAreaM2, simplifyRing, type LatLng } from '@/lib/geo';
 import { ensureLocationPermission, flushNow, getCurrentPosition, startTracking, stopTracking } from '@/lib/location';
 import { snapToRoads } from '@/lib/snap';
 import type { TerritoryDoc, TerritoryPolygon, WalkStats } from '@/lib/types';
@@ -269,6 +269,68 @@ export default function MapScreen() {
     }
   }
 
+  async function runDebugLoop() {
+    if (!firebaseUser) return;
+    let base = position;
+    if (!base) {
+      base = await getCurrentPosition();
+      if (!base) {
+        setNoFix(true);
+        return;
+      }
+    }
+    setNoFix(false);
+    const m = 60; // ~60m square around the current spot
+    const dLat = m / 110540;
+    const dLng = m / (111320 * Math.cos((base.lat * Math.PI) / 180));
+    const corners: [number, number][] = [
+      [base.lat + dLat, base.lng - dLng],
+      [base.lat + dLat, base.lng + dLng],
+      [base.lat - dLat, base.lng + dLng],
+      [base.lat - dLat, base.lng - dLng],
+    ];
+    // Densify the square perimeter (~every 8m) so OSRM match keeps the shape.
+    const square: LatLng[] = [];
+    for (let i = 0; i < 4; i++) {
+      const a = corners[i];
+      const b = corners[(i + 1) % 4];
+      const n = Math.max(
+        1,
+        Math.round(haversine({ lat: a[0], lng: a[1] }, { lat: b[0], lng: b[1] }) / 8)
+      );
+      for (let k = 0; k < n; k++) {
+        square.push({ lat: a[0] + ((b[0] - a[0]) * k) / n, lng: a[1] + ((b[1] - a[1]) * k) / n });
+      }
+    }
+    square.push(square[0]);
+
+    let ring = square;
+    const snapped = await snapToRoads(square);
+    const candidate = [...simplifyRing(snapped), snapped[0]];
+    if (polygonAreaM2(candidate) >= 50) ring = candidate;
+    console.log(
+      '[walkwars] debug ring',
+      JSON.stringify({ ringPts: ring.length, areaM2: Math.round(polygonAreaM2(ring)) })
+    );
+
+    setTrail(ring);
+    setTrailClosed(true);
+    mapRef.current?.fitTo(ring);
+    try {
+      const id = await createTerritory(firebaseUser.uid, ring);
+      if (id) {
+        console.log('[walkwars] debug territory id=' + id);
+        setClaimedFlash(true);
+        setTimeout(() => setClaimedFlash(false), 4000);
+      } else {
+        console.log('[walkwars] debug territory skipped (sliver)');
+      }
+    } catch (e) {
+      console.log('[walkwars] debug createTerritory FAILED', String(e));
+    }
+    await refreshTrailTerritory(ring);
+  }
+
   function onMapMove(lat: number, lng: number) {
     if (moveGuard.current > 0) {
       moveGuard.current = 0;
@@ -320,6 +382,11 @@ export default function MapScreen() {
             <Text style={[styles.locatePillText, followOn && styles.followPillTextActive]}>
               {followOn ? 'Following' : 'Follow'}
             </Text>
+          </Pressable>
+        </View>
+        <View style={styles.debugRow}>
+          <Pressable style={styles.debugPill} onPress={() => void runDebugLoop()}>
+            <Text style={styles.debugPillText}>Test loop</Text>
           </Pressable>
         </View>
         {(permBlocked || loadingTiles || noFix || showMock || claimedFlash) && (
@@ -428,6 +495,19 @@ const styles = StyleSheet.create({
   locatePillText: { fontSize: 13, fontWeight: '700', color: '#2563eb' },
   followPillActive: { backgroundColor: '#2563eb', borderColor: '#2563eb' },
   followPillTextActive: { color: '#ffffff' },
+  debugRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8 },
+  debugPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(15,23,42,0.85)',
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  debugPillText: { fontSize: 13, fontWeight: '700', color: '#cbd5e1' },
   badgeRow: { gap: 6 },
   loadingBadge: {
     alignSelf: 'flex-start',
