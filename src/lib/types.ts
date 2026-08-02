@@ -1,3 +1,5 @@
+import type { LatLng } from './geo';
+
 export interface WalkUser {
   uid: string;
   name: string;
@@ -35,4 +37,5 @@ export interface WalkStats {
   lng?: number;
   accuracy?: number;
   mocked?: boolean;
+  path?: LatLng[];
 }

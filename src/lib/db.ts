@@ -13,7 +13,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { db } from './firebase';
-import { geohash, geohashNeighbors, type TilePoint } from './geo';
+import { geohash, geohashNeighbors, type LatLng, type TilePoint } from './geo';
 import type { TileDoc, WalkUser } from './types';
 
 const NOW = () => Date.now();
@@ -94,6 +94,26 @@ export async function queryTilesInArea(lat: number, lng: number): Promise<TileDo
   const prefixes = geohashNeighbors(lat, lng, 6);
   const chunks: string[][] = [];
   for (let i = 0; i < prefixes.length; i += 10) chunks.push(prefixes.slice(i, i + 10));
+
+  const all: TileDoc[] = [];
+  for (const chunk of chunks) {
+    const q = query(collection(db, 'tiles'), where('gh6', 'in', chunk));
+    const snap = await getDocs(q);
+    snap.forEach((d) => all.push(d.data() as TileDoc));
+  }
+  return all;
+}
+
+/** Tiles along a whole walk trail (dedupes geohash prefixes across all points). */
+export async function queryTilesForTrail(points: LatLng[]): Promise<TileDoc[]> {
+  if (points.length === 0) return [];
+  const prefixes = new Set<string>();
+  for (const p of points) {
+    for (const gh of geohashNeighbors(p.lat, p.lng, 6)) prefixes.add(gh);
+  }
+  const list = [...prefixes];
+  const chunks: string[][] = [];
+  for (let i = 0; i < list.length; i += 10) chunks.push(list.slice(i, i + 10));
 
   const all: TileDoc[] = [];
   for (const chunk of chunks) {

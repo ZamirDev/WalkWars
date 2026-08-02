@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, AppState, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LeafletMap, type LeafletMapHandle } from '@/components/LeafletMap';
 import { useAuth } from '@/lib/auth-context';
 import { colorForOwner } from '@/lib/colors';
-import { queryTilesInArea } from '@/lib/db';
+import { queryTilesForTrail, queryTilesInArea } from '@/lib/db';
 import { tileRing, type LatLng } from '@/lib/geo';
-import { flushNow, getCurrentPosition, startTracking, stopTracking } from '@/lib/location';
-import type { TerritoryPolygon, WalkStats } from '@/lib/types';
+import { ensureLocationPermission, flushNow, getCurrentPosition, startTracking, stopTracking } from '@/lib/location';
+import type { TerritoryPolygon, TileDoc, WalkStats } from '@/lib/types';
 
 const FREE_RADIUS = 15;
 const PRO_RADIUS = 30;
@@ -20,13 +20,17 @@ export default function MapScreen() {
 
   const [position, setPosition] = useState<LatLng | null>(null);
   const [stats, setStats] = useState<WalkStats | null>(null);
+  const [trail, setTrail] = useState<LatLng[]>([]);
+  const trailRef = useRef<LatLng[]>([]);
   const [tracking, setTracking] = useState(false);
   const [polygons, setPolygons] = useState<TerritoryPolygon[]>([]);
   const [loadingTiles, setLoadingTiles] = useState(false);
   const [noFix, setNoFix] = useState(false);
+  const [permBlocked, setPermBlocked] = useState(false);
   const [locating, setLocating] = useState(false);
   const [followOn, setFollowOn] = useState(false);
   const locatingRef = useRef(false);
+  const permBlockedRef = useRef(false);
   const followOnRef = useRef(false);
   const moveGuard = useRef(0);
 
@@ -39,34 +43,54 @@ export default function MapScreen() {
     if (!loading && !firebaseUser) router.replace('/auth');
   }, [loading, firebaseUser, router]);
 
+  const renderTerritory = useCallback(
+    (docs: TileDoc[]) => {
+      const colorBy = new Map<string, string>();
+      const polys: TerritoryPolygon[] = [];
+      for (const t of docs) {
+        let ownerId: string | null = null;
+        let best = 0;
+        for (const [uid, s] of Object.entries(t.strengths)) {
+          if (s > best) {
+            best = s;
+            ownerId = uid;
+          }
+        }
+        if (!ownerId || best <= 0) continue;
+        if (!colorBy.has(ownerId)) colorBy.set(ownerId, colorForOwner(ownerId, ownerId === me));
+        polys.push({ ring: tileRing({ lat: t.lat, lng: t.lng }), color: colorBy.get(ownerId)!, ownerId });
+      }
+      setPolygons(polys);
+    },
+    [me]
+  );
+
   const refreshTerritory = useCallback(
     async (lat: number, lng: number) => {
       setLoadingTiles(true);
       try {
-        const docs = await queryTilesInArea(lat, lng);
-        const colorBy = new Map<string, string>();
-        const polys: TerritoryPolygon[] = [];
-        for (const t of docs) {
-          let ownerId: string | null = null;
-          let best = 0;
-          for (const [uid, s] of Object.entries(t.strengths)) {
-            if (s > best) {
-              best = s;
-              ownerId = uid;
-            }
-          }
-          if (!ownerId || best <= 0) continue;
-          if (!colorBy.has(ownerId)) colorBy.set(ownerId, colorForOwner(ownerId, ownerId === me));
-          polys.push({ ring: tileRing({ lat: t.lat, lng: t.lng }), color: colorBy.get(ownerId)!, ownerId });
-        }
-        setPolygons(polys);
+        renderTerritory(await queryTilesInArea(lat, lng));
       } catch {
         /* keep last tiles */
       } finally {
         setLoadingTiles(false);
       }
     },
-    [me]
+    [renderTerritory]
+  );
+
+  const refreshTrailTerritory = useCallback(
+    async (points: LatLng[]) => {
+      setLoadingTiles(true);
+      try {
+        renderTerritory(await queryTilesForTrail(points));
+      } catch {
+        /* keep last tiles */
+      } finally {
+        setLoadingTiles(false);
+      }
+    },
+    [renderTerritory]
   );
 
   const scheduleRefresh = useCallback(
@@ -80,6 +104,10 @@ export default function MapScreen() {
   const handleStats = useCallback(
     (s: WalkStats) => {
       setStats(s);
+      if (s.path) {
+        trailRef.current = s.path;
+        setTrail(s.path);
+      }
       if (s.lat != null && s.lng != null) {
         setPosition({ lat: s.lat, lng: s.lng, accuracy: s.accuracy });
         mapRef.current?.setUser(s.lat, s.lng, claimRadius);
@@ -110,9 +138,16 @@ export default function MapScreen() {
     locatingRef.current = true;
     setLocating(true);
     try {
-      let pos = await getCurrentPosition();
+      const perm = await ensureLocationPermission();
+      if (perm.state !== 'granted') {
+        setPermBlocked(perm.state === 'blocked');
+        setNoFix(true);
+        return;
+      }
+      setPermBlocked(false);
+      setNoFix(false);
+      const pos = await getCurrentPosition();
       if (pos) {
-        setNoFix(false);
         setPosition(pos);
         mapRef.current?.center(pos.lat, pos.lng);
         mapRef.current?.setUser(pos.lat, pos.lng, claimRadius);
@@ -130,12 +165,20 @@ export default function MapScreen() {
     if (!firebaseUser) return;
     let cancelled = false;
     (async () => {
-      let pos = await getCurrentPosition();
+      const perm = await ensureLocationPermission();
+      if (cancelled) return;
+      if (perm.state !== 'granted') {
+        setPermBlocked(perm.state === 'blocked');
+        setNoFix(true);
+        return;
+      }
+      const pos = await getCurrentPosition();
       if (cancelled) return;
       if (!pos) {
         setNoFix(true);
         return;
       }
+      setPermBlocked(false);
       setNoFix(false);
       setPosition(pos);
       mapRef.current?.center(pos.lat, pos.lng);
@@ -148,8 +191,19 @@ export default function MapScreen() {
   }, [firebaseUser, claimRadius, scheduleRefresh]);
 
   useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && permBlockedRef.current) void locate();
+    });
+    return () => sub.remove();
+  }, [locate]);
+
+  useEffect(() => {
     followOnRef.current = followOn;
   }, [followOn]);
+
+  useEffect(() => {
+    permBlockedRef.current = permBlocked;
+  }, [permBlocked]);
 
   useEffect(() => {
     return () => {
@@ -160,6 +214,8 @@ export default function MapScreen() {
 
   async function startSession() {
     if (!firebaseUser) return;
+    setTrail([]);
+    trailRef.current = [];
     await locate();
     const ok = await startTracking(firebaseUser.uid, claimRadius, handleStats);
     setTracking(ok);
@@ -170,6 +226,11 @@ export default function MapScreen() {
     if (firebaseUser) await flushNow(firebaseUser.uid);
     await stopTracking();
     setTracking(false);
+    const pts = trailRef.current;
+    if (pts.length >= 2) {
+      mapRef.current?.fitTo(pts);
+      await refreshTrailTerritory(pts);
+    }
   }
 
   function onMapMove(lat: number, lng: number) {
@@ -192,6 +253,7 @@ export default function MapScreen() {
         initialLat={position?.lat}
         initialLng={position?.lng}
         polygons={polygons}
+        trail={trail}
         onMove={onMapMove}
       />
 
@@ -223,14 +285,24 @@ export default function MapScreen() {
             </Text>
           </Pressable>
         </View>
-        {(loadingTiles || noFix || showMock) && (
+        {(permBlocked || loadingTiles || noFix || showMock) && (
           <View style={styles.badgeRow}>
             {loadingTiles && (
               <View style={styles.loadingBadge}>
                 <ActivityIndicator size="small" color="#2563eb" />
               </View>
             )}
-            {noFix && (
+            {permBlocked && (
+              <View style={styles.warnBanner}>
+                <Text style={styles.warnText}>
+                  Location permission is off — turn it on to find yourself and claim territory.
+                </Text>
+                <Pressable style={styles.enableBtn} onPress={() => Linking.openSettings()}>
+                  <Text style={styles.enableBtnText}>Open Settings</Text>
+                </Pressable>
+              </View>
+            )}
+            {!permBlocked && noFix && (
               <View style={styles.warnBanner}>
                 <Text style={styles.warnText}>
                   Location unavailable — enable High accuracy mode, go near a window, or press Locate to retry.
@@ -329,6 +401,15 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   warnText: { fontSize: 12, fontWeight: '600', color: '#92400e' },
+  enableBtn: {
+    alignSelf: 'flex-start',
+    marginTop: 8,
+    backgroundColor: '#2563eb',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+  },
+  enableBtnText: { fontSize: 13, fontWeight: '700', color: '#ffffff' },
   bottomBar: { position: 'absolute', bottom: 0, left: 0, right: 0, alignItems: 'center', gap: 12 },
   statsPanel: {
     flexDirection: 'row',

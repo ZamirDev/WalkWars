@@ -1,6 +1,7 @@
-import { forwardRef, useCallback, useImperativeHandle, useRef } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from 'react';
 import { StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
+import type { LatLng } from '@/lib/geo';
 import type { TerritoryPolygon } from '@/lib/types';
 
 interface LeafletMapProps {
@@ -8,12 +9,14 @@ interface LeafletMapProps {
   initialLat?: number;
   initialLng?: number;
   polygons: TerritoryPolygon[];
+  trail?: LatLng[];
   onMove?: (lat: number, lng: number, zoom: number) => void;
 }
 
 export interface LeafletMapHandle {
   setUser: (lat: number, lng: number, radius: number) => void;
   center: (lat: number, lng: number) => void;
+  fitTo: (pts: LatLng[]) => void;
 }
 
 const MAP_HTML = `<!DOCTYPE html>
@@ -34,17 +37,19 @@ const MAP_HTML = `<!DOCTYPE html>
 <body>
 <div id="map"></div>
 <script>
-  var map = L.map('map', { zoomControl: false, attributionControl: true }).setView([20.0, 78.0], 6);
+  var map = L.map('map', { zoomControl: false, attributionControl: true }).setView([20, 0], 2);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
   }).addTo(map);
   var layer = L.layerGroup().addTo(map);
-  var userCircle = L.circle([20.0, 78.0], { radius: 15, color: '#2563eb', weight: 2, fillColor: '#2563eb', fillOpacity: 0.15, dashArray: '4 4' }).addTo(map);
-  var userMarker = L.marker([20.0, 78.0], {
+  var trailLayer = L.layerGroup().addTo(map);
+  var userShown = false;
+  var userCircle = L.circle([0, 0], { radius: 15, color: '#2563eb', weight: 2, fillColor: '#2563eb', fillOpacity: 0.15, dashArray: '4 4' });
+  var userMarker = L.marker([0, 0], {
     icon: L.divIcon({ className: 'user-icon', html: '<div class="user-pulse"></div><div class="user-dot"></div>', iconSize: [24, 24], iconAnchor: [12, 12] }),
     zIndexOffset: 1000
-  }).addTo(map);
+  });
 
   function emitMove() {
     var c = map.getCenter();
@@ -52,20 +57,61 @@ const MAP_HTML = `<!DOCTYPE html>
   }
   map.on('moveend', emitMove);
 
+  function wvLog(s) {
+    window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'log', msg: s }));
+  }
+
   var bridge = {
-    setView: function (lat, lng, zoom) {
-      map.setView([lat, lng], zoom || map.getZoom());
+    setView: function (pos) {
+      var lat = pos.lat, lng = pos.lng;
+      var zoom = Math.round(pos.zoom || 17);
+      map.setView([lat, lng], zoom, { animate: false });
+      if (Math.round(map.getZoom()) !== zoom) map.setZoom(zoom);
+      wvLog('setView ' + lat.toFixed(5) + ',' + lng.toFixed(5) + ' z=' + map.getZoom());
     },
-    setUser: function (lat, lng, radius) {
-      userMarker.setLatLng([lat, lng]);
-      userCircle.setLatLng([lat, lng]);
-      if (radius) userCircle.setRadius(radius);
+    setUser: function (pos) {
+      userMarker.setLatLng([pos.lat, pos.lng]);
+      userCircle.setLatLng([pos.lat, pos.lng]);
+      if (pos.radius) userCircle.setRadius(pos.radius);
+      if (!userShown) {
+        userShown = true;
+        userMarker.addTo(map);
+        userCircle.addTo(map);
+      }
+      wvLog('setUser ' + pos.lat.toFixed(5) + ',' + pos.lng.toFixed(5));
     },
     setTerritory: function (polygons) {
       layer.clearLayers();
       (polygons || []).forEach(function (p) {
         L.polygon(p.ring, { color: p.color, weight: 1.5, fillColor: p.color, fillOpacity: 0.45 }).addTo(layer);
       });
+    },
+    setTrail: function (path) {
+      trailLayer.clearLayers();
+      var pts = (path || []).map(function (p) { return [p.lat, p.lng]; });
+      if (pts.length < 2) return;
+      var closed = pts.length > 4 &&
+        Math.abs(pts[0][0] - pts[pts.length - 1][0]) < 0.00006 &&
+        Math.abs(pts[0][1] - pts[pts.length - 1][1]) < 0.00006;
+      L.polyline(pts, {
+        color: '#2563eb',
+        weight: 4,
+        opacity: 0.85,
+        dashArray: closed ? null : '6 8',
+        lineJoin: 'round'
+      }).addTo(trailLayer);
+      if (closed) {
+        L.circle(pts[0], { radius: 5, color: '#16a34a', weight: 2, fillColor: '#16a34a', fillOpacity: 1 }).addTo(trailLayer);
+      }
+      wvLog('setTrail ' + pts.length + ' pts' + (closed ? ' CLOSED' : ''));
+    },
+    fitBounds: function (pts) {
+      if (!pts || pts.length < 2) return;
+      map.fitBounds(
+        L.latLngBounds(pts.map(function (p) { return [p.lat, p.lng]; })),
+        { padding: [48, 48], maxZoom: 16 }
+      );
+      wvLog('fitBounds ' + pts.length + ' pts z=' + map.getZoom());
     }
   };
   window.bridge = bridge;
@@ -75,7 +121,7 @@ const MAP_HTML = `<!DOCTYPE html>
 </html>`;
 
 export const LeafletMap = forwardRef<LeafletMapHandle, LeafletMapProps>(function LeafletMap(
-  { style, initialLat, initialLng, polygons, onMove },
+  { style, initialLat, initialLng, polygons, trail, onMove },
   ref
 ) {
   const wvRef = useRef<WebView | null>(null);
@@ -97,6 +143,7 @@ export const LeafletMap = forwardRef<LeafletMapHandle, LeafletMapProps>(function
     () => ({
       setUser: (lat, lng, radius) => call('setUser', { lat, lng, radius }),
       center: (lat, lng) => call('setView', { lat, lng, zoom: 17 }),
+      fitTo: (pts) => call('fitBounds', pts),
     }),
     [call]
   );
@@ -107,6 +154,10 @@ export const LeafletMap = forwardRef<LeafletMapHandle, LeafletMapProps>(function
     for (const fn of q) fn();
   }, []);
 
+  useEffect(() => {
+    call('setTrail', trail ?? []);
+  }, [trail, call]);
+
   const handleMessage = useCallback(
     (e: WebViewMessageEvent) => {
       try {
@@ -116,6 +167,8 @@ export const LeafletMap = forwardRef<LeafletMapHandle, LeafletMapProps>(function
           flushPending();
         } else if (msg.type === 'move' && onMove) {
           onMove(msg.lat, msg.lng, msg.zoom);
+        } else if (msg.type === 'log') {
+          console.log('[walkwars] wv', msg.msg);
         }
       } catch {
         /* ignore */
@@ -134,11 +187,15 @@ export const LeafletMap = forwardRef<LeafletMapHandle, LeafletMapProps>(function
         javaScriptEnabled
         domStorageEnabled
         onMessage={handleMessage}
+        onLoadStart={() => {
+          readyRef.current = false;
+        }}
         onLoadEnd={() => {
           if (initialLat != null && initialLng != null) {
             call('setView', { lat: initialLat, lng: initialLng, zoom: 17 });
           }
           call('setTerritory', polygons);
+          call('setTrail', trail ?? []);
         }}
       />
     </View>
