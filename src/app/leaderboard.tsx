@@ -46,9 +46,9 @@ export default function LeaderboardScreen() {
               <Text style={styles.rank}>{index + 1}</Text>
               <View style={styles.nameCol}>
                 <Text style={styles.name}>{item.name}</Text>
-                <Text style={styles.sub}>{item.distinctTiles} tiles · {item.totalDistanceKm.toFixed(1)} km</Text>
+                <Text style={styles.sub}>{item.distinctTiles} territories · {item.totalDistanceKm.toFixed(1)} km</Text>
               </View>
-              <Text style={styles.score}>{item.territoryScore.toLocaleString()}</Text>
+              <Text style={styles.score}>{item.territoryScore.toLocaleString()} m²</Text>
             </View>
           );
         }}

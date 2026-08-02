@@ -10,6 +10,7 @@ interface LeafletMapProps {
   initialLng?: number;
   polygons: TerritoryPolygon[];
   trail?: LatLng[];
+  trailClosed?: boolean;
   onMove?: (lat: number, lng: number, zoom: number) => void;
 }
 
@@ -86,13 +87,11 @@ const MAP_HTML = `<!DOCTYPE html>
         L.polygon(p.ring, { color: p.color, weight: 1.5, fillColor: p.color, fillOpacity: 0.45 }).addTo(layer);
       });
     },
-    setTrail: function (path) {
+    setTrail: function (arg) {
       trailLayer.clearLayers();
-      var pts = (path || []).map(function (p) { return [p.lat, p.lng]; });
+      var pts = (arg.path || []).map(function (p) { return [p.lat, p.lng]; });
       if (pts.length < 2) return;
-      var closed = pts.length > 4 &&
-        Math.abs(pts[0][0] - pts[pts.length - 1][0]) < 0.00006 &&
-        Math.abs(pts[0][1] - pts[pts.length - 1][1]) < 0.00006;
+      var closed = !!arg.closed;
       L.polyline(pts, {
         color: '#2563eb',
         weight: 4,
@@ -121,7 +120,7 @@ const MAP_HTML = `<!DOCTYPE html>
 </html>`;
 
 export const LeafletMap = forwardRef<LeafletMapHandle, LeafletMapProps>(function LeafletMap(
-  { style, initialLat, initialLng, polygons, trail, onMove },
+  { style, initialLat, initialLng, polygons, trail, trailClosed, onMove },
   ref
 ) {
   const wvRef = useRef<WebView | null>(null);
@@ -155,8 +154,12 @@ export const LeafletMap = forwardRef<LeafletMapHandle, LeafletMapProps>(function
   }, []);
 
   useEffect(() => {
-    call('setTrail', trail ?? []);
-  }, [trail, call]);
+    call('setTrail', { path: trail ?? [], closed: trailClosed ?? false });
+  }, [trail, trailClosed, call]);
+
+  useEffect(() => {
+    call('setTerritory', polygons);
+  }, [polygons, call]);
 
   const handleMessage = useCallback(
     (e: WebViewMessageEvent) => {
@@ -195,7 +198,7 @@ export const LeafletMap = forwardRef<LeafletMapHandle, LeafletMapProps>(function
             call('setView', { lat: initialLat, lng: initialLng, zoom: 17 });
           }
           call('setTerritory', polygons);
-          call('setTrail', trail ?? []);
+          call('setTrail', { path: trail ?? [], closed: trailClosed ?? false });
         }}
       />
     </View>

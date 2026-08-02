@@ -24,9 +24,8 @@ export default function PaywallScreen() {
 
         <View style={styles.perks}>
           <Perk label="Claim radius" free="15 m" pro="30 m" />
-          <Perk label="Tile cap" free="500 tiles" pro="Unlimited" />
-          <Perk label="Territory decay" free="Yes" pro="None" />
           <Perk label="Background tracking" free="No" pro="Yes" />
+          <Perk label="Territory perks" free="In dev" pro="In dev" />
         </View>
 
         <Pressable style={styles.cta}>

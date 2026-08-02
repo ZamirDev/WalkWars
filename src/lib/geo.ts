@@ -4,14 +4,6 @@ export interface LatLng {
   accuracy?: number;
 }
 
-export interface TilePoint {
-  key: string;
-  lat: number;
-  lng: number;
-}
-
-export const CELL = 0.00025; // ~27.7m at the equator
-
 export function haversine(a: LatLng, b: LatLng): number {
   const R = 6371000;
   const toRad = (d: number) => (d * Math.PI) / 180;
@@ -21,36 +13,6 @@ export function haversine(a: LatLng, b: LatLng): number {
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(s));
-}
-
-export function tileKey(lat: number, lng: number): string {
-  const ix = Math.round(lat / CELL);
-  const iy = Math.round(lng / CELL);
-  return `${ix}_${iy}`;
-}
-
-export function tileCenter(key: string): LatLng {
-  const [ix, iy] = key.split('_').map(Number);
-  return { lat: ix * CELL, lng: iy * CELL };
-}
-
-/** Tiles whose center is within `radius` meters of `p`. */
-export function tilesInRadius(p: LatLng, radius: number): TilePoint[] {
-  const latCells = Math.ceil(radius / (CELL * 111320));
-  const latIx = Math.round(p.lat / CELL);
-  const lngIx = Math.round(p.lng / CELL);
-  const cosLat = Math.max(0.2, Math.cos((p.lat * Math.PI) / 180));
-  const lngCells = Math.ceil(radius / (CELL * 111320 * cosLat));
-  const out: TilePoint[] = [];
-  for (let ix = latIx - latCells; ix <= latIx + latCells; ix++) {
-    for (let iy = lngIx - lngCells; iy <= lngIx + lngCells; iy++) {
-      const c = { lat: ix * CELL, lng: iy * CELL };
-      if (haversine(p, c) <= radius) {
-        out.push({ key: `${ix}_${iy}`, lat: c.lat, lng: c.lng });
-      }
-    }
-  }
-  return out;
 }
 
 // --- Geohash (for efficient-ish Firestore viewport queries) ---
@@ -83,36 +45,107 @@ export function geohash(lat: number, lng: number, precision = 6): string {
   return hash;
 }
 
-const NEIGHBORS = [
-  [-1, -1], [0, -1], [1, -1],
-  [-1, 0], [1, 0],
-  [-1, 1], [0, 1], [1, 1],
-] as const;
-
 /** 3x3 block of geohash prefixes around `lat,lng` (center + 8 neighbors). */
 export function geohashNeighbors(lat: number, lng: number, precision = 6): string[] {
+  const bits = precision * 5;
+  const latBits = Math.floor(bits / 2);
+  const lngBits = Math.ceil(bits / 2);
+  const latCell = 180 / 2 ** latBits;
+  const lngCell = 360 / 2 ** lngBits;
   const center = geohash(lat, lng, precision);
   const out = new Set<string>([center]);
-  for (const [dlat, dlng] of NEIGHBORS) {
-    const nlat = lat + dlat * 0.011; // ~1.2km per unit at precision 6
-    const nlng = lng + dlng * 0.011;
-    out.add(geohash(nlat, nlng, precision));
+  for (let dl = -1; dl <= 1; dl++) {
+    for (let dn = -1; dn <= 1; dn++) {
+      out.add(geohash(lat + dl * latCell, lng + dn * lngCell, precision));
+    }
   }
   return [...out];
 }
 
-export function lerp(a: LatLng, b: LatLng, t: number): LatLng {
-  return { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
+// --- Polygon helpers (road territory loops) ---
+
+/** Area of a ring in m² (shoelace on a planar local projection). */
+export function polygonAreaM2(points: LatLng[]): number {
+  if (points.length < 3) return 0;
+  const ref = points[0];
+  const x = (p: LatLng) => (p.lng - ref.lng) * 111320 * Math.cos((ref.lat * Math.PI) / 180);
+  const y = (p: LatLng) => (p.lat - ref.lat) * 110540;
+  let sum = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    sum += x(a) * y(b) - x(b) * y(a);
+  }
+  return Math.abs(sum / 2);
 }
 
-/** Polygon ring (4 corners, Leaflet [lat,lng] order) for a tile center. */
-export function tileRing(center: LatLng): [number, number][] {
-  const h = CELL / 2;
-  const w = CELL / 2 / Math.max(0.2, Math.cos((center.lat * Math.PI) / 180));
-  return [
-    [center.lat - h, center.lng - w],
-    [center.lat - h, center.lng + w],
-    [center.lat + h, center.lng + w],
-    [center.lat + h, center.lng - w],
-  ];
+/** Centroid (average) of a ring. */
+export function centroid(points: LatLng[]): LatLng {
+  let lat = 0, lng = 0;
+  for (const p of points) {
+    lat += p.lat;
+    lng += p.lng;
+  }
+  const n = Math.max(1, points.length);
+  return { lat: lat / n, lng: lng / n };
+}
+
+/** Douglas–Peucker simplification; tolerance in meters. */
+export function simplifyRing(points: LatLng[], toleranceM = 5): LatLng[] {
+  if (points.length <= 3) return points;
+  const tolM2 = toleranceM * toleranceM;
+
+  const sqSegDist = (p: LatLng, a: LatLng, b: LatLng) => {
+    const dx = b.lng - a.lng, dy = b.lat - a.lat;
+    const len2 = dx * dx + dy * dy;
+    let t = len2 === 0 ? 0 : ((p.lng - a.lng) * dx + (p.lat - a.lat) * dy) / len2;
+    t = Math.max(0, Math.min(1, t));
+    const px = p.lng - (a.lng + t * dx), py = p.lat - (a.lat + t * dy);
+    return px * px + py * py;
+  };
+
+  const dp = (pts: LatLng[]): LatLng[] => {
+    if (pts.length <= 2) return pts;
+    let maxD = -1, index = -1;
+    for (let i = 1; i < pts.length - 1; i++) {
+      const d = sqSegDist(pts[i], pts[0], pts[pts.length - 1]);
+      if (d > maxD) { maxD = d; index = i; }
+    }
+    if (maxD > tolM2) {
+      const left = dp(pts.slice(0, index + 1));
+      const right = dp(pts.slice(index));
+      return [...left.slice(0, -1), ...right];
+    }
+    return [pts[0], pts[pts.length - 1]];
+  };
+
+  return dp(points);
+}
+
+/** Is the trail a closed loop (first ≈ last point)? */
+export function isClosedLoop(points: LatLng[], thresholdM = 8): boolean {
+  if (points.length < 4) return false;
+  return haversine(points[0], points[points.length - 1]) <= thresholdM;
+}
+
+/** Point-in-polygon (ray casting) for steal/overlap checks. */
+export function pointInRing(p: LatLng, ring: LatLng[]): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i], b = ring[j];
+    const intersect =
+      a.lng > p.lng !== b.lng > p.lng &&
+      p.lat < ((b.lat - a.lat) * (p.lng - a.lng)) / (b.lng - a.lng) + a.lat;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+/** Rough overlap test: any vertex of one ring inside the other, or shared centroid. */
+export function ringsIntersect(a: LatLng[], b: LatLng[]): boolean {
+  if (a.length < 3 || b.length < 3) return false;
+  for (const p of a) if (pointInRing(p, b)) return true;
+  for (const p of b) if (pointInRing(p, a)) return true;
+  const ca = centroid(a), cb = centroid(b);
+  return pointInRing(ca, b) || pointInRing(cb, a);
 }

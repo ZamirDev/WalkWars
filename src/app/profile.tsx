@@ -23,7 +23,7 @@ export default function ProfileScreen() {
 
         <View style={styles.statsCard}>
           <Metric label="Territory score" value={(user?.territoryScore ?? 0).toLocaleString()} />
-          <Metric label="Tiles conquered" value={String(user?.distinctTiles ?? 0)} />
+          <Metric label="Territories" value={String(user?.distinctTiles ?? 0)} />
           <Metric label="Distance" value={`${(user?.totalDistanceKm ?? 0).toFixed(1)} km`} />
           <Metric label="Steps" value={(user?.totalSteps ?? 0).toLocaleString()} />
         </View>
@@ -32,8 +32,8 @@ export default function ProfileScreen() {
           <Text style={styles.proTitle}>{user?.isPro ? 'Pro active' : 'Go Pro'}</Text>
           <Text style={styles.proText}>
             {user?.isPro
-              ? '2× claim radius, no tile cap, no decay.'
-              : '2× claim radius, unlimited tiles, no decay — 3x faster territory growth.'}
+              ? '2× claim radius, background tracking.'
+              : '2× claim radius, background tracking — territory perks coming soon.'}
           </Text>
         </Pressable>
 

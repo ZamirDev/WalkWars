@@ -5,10 +5,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { LeafletMap, type LeafletMapHandle } from '@/components/LeafletMap';
 import { useAuth } from '@/lib/auth-context';
 import { colorForOwner } from '@/lib/colors';
-import { queryTilesForTrail, queryTilesInArea } from '@/lib/db';
-import { tileRing, type LatLng } from '@/lib/geo';
+import { createTerritory, queryTerritoriesForTrail, queryTerritoriesInArea } from '@/lib/db';
+import { haversine, isClosedLoop, simplifyRing, type LatLng } from '@/lib/geo';
 import { ensureLocationPermission, flushNow, getCurrentPosition, startTracking, stopTracking } from '@/lib/location';
-import type { TerritoryPolygon, TileDoc, WalkStats } from '@/lib/types';
+import { snapToRoads } from '@/lib/snap';
+import type { TerritoryDoc, TerritoryPolygon, WalkStats } from '@/lib/types';
 
 const FREE_RADIUS = 15;
 const PRO_RADIUS = 30;
@@ -21,6 +22,7 @@ export default function MapScreen() {
   const [position, setPosition] = useState<LatLng | null>(null);
   const [stats, setStats] = useState<WalkStats | null>(null);
   const [trail, setTrail] = useState<LatLng[]>([]);
+  const [trailClosed, setTrailClosed] = useState(false);
   const trailRef = useRef<LatLng[]>([]);
   const [tracking, setTracking] = useState(false);
   const [polygons, setPolygons] = useState<TerritoryPolygon[]>([]);
@@ -29,6 +31,7 @@ export default function MapScreen() {
   const [permBlocked, setPermBlocked] = useState(false);
   const [locating, setLocating] = useState(false);
   const [followOn, setFollowOn] = useState(false);
+  const [claimedFlash, setClaimedFlash] = useState(false);
   const locatingRef = useRef(false);
   const permBlockedRef = useRef(false);
   const followOnRef = useRef(false);
@@ -44,23 +47,20 @@ export default function MapScreen() {
   }, [loading, firebaseUser, router]);
 
   const renderTerritory = useCallback(
-    (docs: TileDoc[]) => {
+    (docs: TerritoryDoc[]) => {
       const colorBy = new Map<string, string>();
       const polys: TerritoryPolygon[] = [];
       for (const t of docs) {
-        let ownerId: string | null = null;
-        let best = 0;
-        for (const [uid, s] of Object.entries(t.strengths)) {
-          if (s > best) {
-            best = s;
-            ownerId = uid;
-          }
-        }
-        if (!ownerId || best <= 0) continue;
-        if (!colorBy.has(ownerId)) colorBy.set(ownerId, colorForOwner(ownerId, ownerId === me));
-        polys.push({ ring: tileRing({ lat: t.lat, lng: t.lng }), color: colorBy.get(ownerId)!, ownerId });
+        if (!t.ring || t.ring.length < 3) continue;
+        if (!colorBy.has(t.ownerId)) colorBy.set(t.ownerId, colorForOwner(t.ownerId, t.ownerId === me));
+        polys.push({
+          ring: t.ring.map((p) => [p.lat, p.lng] as [number, number]),
+          color: colorBy.get(t.ownerId)!,
+          ownerId: t.ownerId,
+        });
       }
       setPolygons(polys);
+      console.log('[walkwars] render', polys.length, 'territories');
     },
     [me]
   );
@@ -69,9 +69,9 @@ export default function MapScreen() {
     async (lat: number, lng: number) => {
       setLoadingTiles(true);
       try {
-        renderTerritory(await queryTilesInArea(lat, lng));
+        renderTerritory(await queryTerritoriesInArea(lat, lng));
       } catch {
-        /* keep last tiles */
+        /* keep last territories */
       } finally {
         setLoadingTiles(false);
       }
@@ -83,9 +83,9 @@ export default function MapScreen() {
     async (points: LatLng[]) => {
       setLoadingTiles(true);
       try {
-        renderTerritory(await queryTilesForTrail(points));
+        renderTerritory(await queryTerritoriesForTrail(points));
       } catch {
-        /* keep last tiles */
+        /* keep last territories */
       } finally {
         setLoadingTiles(false);
       }
@@ -107,6 +107,7 @@ export default function MapScreen() {
       if (s.path) {
         trailRef.current = s.path;
         setTrail(s.path);
+        setTrailClosed(isClosedLoop(s.path));
       }
       if (s.lat != null && s.lng != null) {
         setPosition({ lat: s.lat, lng: s.lng, accuracy: s.accuracy });
@@ -216,20 +217,55 @@ export default function MapScreen() {
     if (!firebaseUser) return;
     setTrail([]);
     trailRef.current = [];
+    setTrailClosed(false);
     await locate();
-    const ok = await startTracking(firebaseUser.uid, claimRadius, handleStats);
+    const ok = await startTracking(firebaseUser.uid, handleStats);
     setTracking(ok);
     if (!ok) setNoFix(true);
   }
 
   async function stopSession() {
-    if (firebaseUser) await flushNow(firebaseUser.uid);
-    await stopTracking();
-    setTracking(false);
-    const pts = trailRef.current;
-    if (pts.length >= 2) {
-      mapRef.current?.fitTo(pts);
-      await refreshTrailTerritory(pts);
+    try {
+      await stopTracking();
+      setTracking(false);
+      const pts = trailRef.current;
+      console.log('[walkwars] stop', JSON.stringify({ pts: pts.length }));
+      if (pts.length >= 2) {
+        mapRef.current?.fitTo(pts);
+        const loop = isClosedLoop(pts);
+        console.log(
+          '[walkwars] stop loop=' + loop + ' gap=' + Math.round(haversine(pts[0], pts[pts.length - 1])) + 'm'
+        );
+        if (loop) {
+          const snapped = await snapToRoads(pts);
+          console.log(
+            '[walkwars] snap -> ' + snapped.length + ' pts' + (snapped === pts ? ' (fallback)' : '')
+          );
+          const ring = [...simplifyRing(snapped), snapped[0]]; // force a closed polygon
+          setTrail(ring);
+          setTrailClosed(true);
+          if (firebaseUser) {
+            try {
+              const id = await createTerritory(firebaseUser.uid, ring);
+              if (id) {
+                console.log('[walkwars] territory id=' + id);
+                setClaimedFlash(true);
+                setTimeout(() => setClaimedFlash(false), 4000);
+              } else {
+                console.log('[walkwars] territory skipped (sliver)');
+              }
+            } catch (e) {
+              console.log('[walkwars] createTerritory FAILED', String(e));
+            }
+          }
+        } else {
+          setTrail(pts);
+          setTrailClosed(false);
+        }
+        await refreshTrailTerritory(pts);
+      }
+    } finally {
+      if (firebaseUser) await flushNow(firebaseUser.uid);
     }
   }
 
@@ -254,6 +290,7 @@ export default function MapScreen() {
         initialLng={position?.lng}
         polygons={polygons}
         trail={trail}
+        trailClosed={trailClosed}
         onMove={onMapMove}
       />
 
@@ -285,7 +322,7 @@ export default function MapScreen() {
             </Text>
           </Pressable>
         </View>
-        {(permBlocked || loadingTiles || noFix || showMock) && (
+        {(permBlocked || loadingTiles || noFix || showMock || claimedFlash) && (
           <View style={styles.badgeRow}>
             {loadingTiles && (
               <View style={styles.loadingBadge}>
@@ -314,6 +351,11 @@ export default function MapScreen() {
                 <Text style={styles.warnText}>Mock location detected — claims paused</Text>
               </View>
             )}
+            {claimedFlash && (
+              <View style={styles.okBanner}>
+                <Text style={styles.okText}>Territory captured!</Text>
+              </View>
+            )}
           </View>
         )}
       </SafeAreaView>
@@ -323,7 +365,6 @@ export default function MapScreen() {
           <Stat label="Distance" value={`${km} km`} />
           <Stat label="Steps" value={String(stats?.steps ?? 0)} />
           <Stat label="Speed" value={stats ? `${stats.speedMps.toFixed(1)} m/s` : '—'} />
-          <Stat label="Claimed" value={String(stats?.claimedTiles ?? 0)} />
         </View>
         {fixAcc != null && (
           <Text style={styles.accText}>Fix accuracy: ±{Math.round(fixAcc)} m</Text>
@@ -401,6 +442,14 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   warnText: { fontSize: 12, fontWeight: '600', color: '#92400e' },
+  okBanner: {
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(187,247,208,0.95)',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  okText: { fontSize: 12, fontWeight: '700', color: '#166534' },
   enableBtn: {
     alignSelf: 'flex-start',
     marginTop: 8,

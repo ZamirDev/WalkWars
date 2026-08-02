@@ -13,10 +13,18 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { db } from './firebase';
-import { geohash, geohashNeighbors, type LatLng, type TilePoint } from './geo';
-import type { TileDoc, WalkUser } from './types';
+import {
+  centroid,
+  geohash,
+  geohashNeighbors,
+  polygonAreaM2,
+  ringsIntersect,
+  type LatLng,
+} from './geo';
+import type { TerritoryDoc, WalkUser } from './types';
 
 const NOW = () => Date.now();
+const GH_PRECISION = 5; // ~4.9km cells — viewport query granularity
 
 export async function getUser(uid: string): Promise<WalkUser | null> {
   const snap = await getDoc(doc(db, 'users', uid));
@@ -52,74 +60,99 @@ export async function touchUser(uid: string): Promise<void> {
   await updateDoc(doc(db, 'users', uid), { lastActiveAt: NOW() }).catch(() => {});
 }
 
-/** Add strength for `uid` on every tile the user walked over. */
-export async function claimTiles(uid: string, tiles: TilePoint[]): Promise<void> {
-  if (tiles.length === 0) return;
+/**
+ * Claim a closed loop as a territory. Last-walker-wins: any existing
+ * territory owned by someone else that the new ring overlaps is deleted and
+ * its area is deducted from the previous owner's score.
+ */
+export async function createTerritory(uid: string, ring: LatLng[]): Promise<string | null> {
+  if (ring.length < 3) return null;
+  const areaM2 = Math.round(polygonAreaM2(ring));
+  if (areaM2 < 10) return null; // degenerate sliver — ignore
+  const center = centroid(ring);
+  const gh5 = geohash(center.lat, center.lng, GH_PRECISION);
+
+  const ref = doc(collection(db, 'territories'));
+  await setDoc(ref, {
+    ownerId: uid,
+    ring: ring.map((p) => ({ lat: p.lat, lng: p.lng })),
+    center,
+    gh5,
+    areaM2,
+    createdAt: NOW(),
+  });
+
+  await stealOverlapping(uid, ring);
+
+  await updateDoc(doc(db, 'users', uid), {
+    territoryScore: increment(areaM2),
+    distinctTiles: increment(1),
+    lastActiveAt: NOW(),
+  }).catch(() => {});
+  return ref.id;
+}
+
+/** Delete territories the new ring overlaps that belong to other users. */
+async function stealOverlapping(uid: string, ring: LatLng[]): Promise<void> {
+  const candidates = await queryTerritoriesForTrail(ring);
+  const targets = candidates.filter(
+    (t) => t.id !== undefined && t.ownerId !== uid && ringsIntersect(ring, t.ring)
+  );
+  if (targets.length === 0) return;
+
   const batch = writeBatch(db);
-  const now = NOW();
-  for (const t of tiles) {
-    const ref = doc(db, 'tiles', t.key);
-    batch.set(
-      ref,
-      {
-        strengths: { [uid]: increment(1) },
-        gh6: geohash(t.lat, t.lng, 6),
-        lat: t.lat,
-        lng: t.lng,
-        updatedAt: now,
-      },
-      { merge: true }
-    );
+  const lossByOwner = new Map<string, number>();
+  for (const t of targets) {
+    batch.delete(doc(db, 'territories', t.id));
+    lossByOwner.set(t.ownerId, (lossByOwner.get(t.ownerId) ?? 0) + t.areaM2);
   }
   await batch.commit();
+  for (const [ownerId, loss] of lossByOwner) {
+    await updateDoc(doc(db, 'users', ownerId), {
+      territoryScore: increment(-loss),
+      distinctTiles: increment(-1),
+    }).catch(() => {});
+  }
 }
 
 /** Flush session walk stats to the user's profile. */
 export async function flushWalkStats(
   uid: string,
-  stats: { distanceM: number; steps: number; newTiles: number }
+  stats: { distanceM: number; steps: number }
 ): Promise<void> {
   const ref = doc(db, 'users', uid);
   await updateDoc(ref, {
     totalDistanceKm: increment(stats.distanceM / 1000),
     totalSteps: increment(stats.steps),
-    territoryScore: increment(stats.newTiles),
-    distinctTiles: increment(stats.newTiles),
     lastActiveAt: NOW(),
   }).catch(() => {});
 }
 
-/** Tiles that may be within ~1.2km of `lat,lng` (geohash-precision-6 prefix query). */
-export async function queryTilesInArea(lat: number, lng: number): Promise<TileDoc[]> {
-  const prefixes = geohashNeighbors(lat, lng, 6);
-  const chunks: string[][] = [];
-  for (let i = 0; i < prefixes.length; i += 10) chunks.push(prefixes.slice(i, i + 10));
-
-  const all: TileDoc[] = [];
-  for (const chunk of chunks) {
-    const q = query(collection(db, 'tiles'), where('gh6', 'in', chunk));
-    const snap = await getDocs(q);
-    snap.forEach((d) => all.push(d.data() as TileDoc));
-  }
-  return all;
+/** Territories within ~5km of `lat,lng` (geohash-precision-5 prefix query). */
+export async function queryTerritoriesInArea(lat: number, lng: number): Promise<TerritoryDoc[]> {
+  return queryTerritoriesForPoints([{ lat, lng }]);
 }
 
-/** Tiles along a whole walk trail (dedupes geohash prefixes across all points). */
-export async function queryTilesForTrail(points: LatLng[]): Promise<TileDoc[]> {
+/** Territories overlapping a trail's geohash windows (dedupes prefixes). */
+export async function queryTerritoriesForTrail(points: LatLng[]): Promise<TerritoryDoc[]> {
+  return queryTerritoriesForPoints(points);
+}
+
+async function queryTerritoriesForPoints(points: LatLng[]): Promise<TerritoryDoc[]> {
   if (points.length === 0) return [];
   const prefixes = new Set<string>();
   for (const p of points) {
-    for (const gh of geohashNeighbors(p.lat, p.lng, 6)) prefixes.add(gh);
+    for (const gh of geohashNeighbors(p.lat, p.lng, GH_PRECISION)) prefixes.add(gh);
   }
   const list = [...prefixes];
   const chunks: string[][] = [];
   for (let i = 0; i < list.length; i += 10) chunks.push(list.slice(i, i + 10));
 
-  const all: TileDoc[] = [];
+  const all: TerritoryDoc[] = [];
   for (const chunk of chunks) {
-    const q = query(collection(db, 'tiles'), where('gh6', 'in', chunk));
+    const q = query(collection(db, 'territories'), where('gh5', 'in', chunk));
     const snap = await getDocs(q);
-    snap.forEach((d) => all.push(d.data() as TileDoc));
+    snap.forEach((d) => all.push({ ...(d.data() as TerritoryDoc), id: d.id }));
   }
   return all;
 }

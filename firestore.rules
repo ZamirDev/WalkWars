@@ -8,12 +8,15 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Anyone signed in can read tiles; anyone signed in can claim tiles
-    // (they only ever increment their own strength via field transforms).
-    match /tiles/{tileKey} {
+    // Shared territory layer, visible to everyone signed in. Anyone signed in
+    // may create a territory (ownerId must be self) and delete one — deletion
+    // only happens via the last-walker-wins steal logic in the app. A real
+    // deployment should move create/steal into a Cloud Function.
+    match /territories/{territoryId} {
       allow read: if request.auth != null;
-      allow create, update: if request.auth != null;
-      allow delete: if false;
+      allow create: if request.auth != null && request.resource.data.ownerId == request.auth.uid;
+      allow update: if request.auth != null && request.resource.data.ownerId == request.auth.uid;
+      allow delete: if request.auth != null;
     }
   }
 }

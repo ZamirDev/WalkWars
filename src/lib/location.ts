@@ -1,23 +1,23 @@
 import * as Location from 'expo-location';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
-import { claimTiles, flushWalkStats } from './db';
-import { haversine, lerp, tilesInRadius, type LatLng, type TilePoint } from './geo';
+import { flushWalkStats } from './db';
+import { haversine, type LatLng } from './geo';
+import { resetSnap, snapPoint } from './snap';
 import type { WalkStats } from './types';
 
 const MAX_SPEED = 30; // m/s (~108 km/h) — relaxed for scooter testing; anti-cheat was 8 m/s, restore before ship
 const MIN_SPEED = 0.05; // m/s — ignore near-static jitter (kept tiny so indoor walks count)
 const MIN_DISTANCE = 1; // m between accepted fixes
-const SAMPLE_STEP = 10; // m between claim sample points along a segment
 const FLUSH_MS = 30000;
 
 let subscription: Location.LocationSubscription | null = null;
 let lastFix: { coords: LatLng; ts: number } | null = null;
 
-let pendingTiles = new Map<string, TilePoint>();
 let sessionDistance = 0;
 let sessionSteps = 0;
 let sessionPath: LatLng[] = [];
 let flushTimer: ReturnType<typeof setInterval> | null = null;
+let snapChain: Promise<void> = Promise.resolve();
 
 export type LocationPermissionState =
   | { state: 'granted' }
@@ -98,26 +98,11 @@ export async function getCurrentPosition(options?: {
   return best;
 }
 
-/** Flush pending tile claims + walk stats right now (called on stop). */
+/** Flush session walk stats right now (called on stop). */
 export async function flushNow(uid: string): Promise<void> {
-  const tiles = [...pendingTiles.values()];
-  pendingTiles.clear();
-  if (tiles.length > 0) {
-    console.log('[walkwars] flushing', tiles.length, 'tiles');
-    try {
-      await claimTiles(uid, tiles);
-    } catch (e) {
-      console.log('[walkwars] claimTiles FAILED', String(e));
-      tiles.forEach((t) => pendingTiles.set(t.key, t));
-    }
-  }
   if (sessionDistance > 0) {
     try {
-      await flushWalkStats(uid, {
-        distanceM: sessionDistance,
-        steps: sessionSteps,
-        newTiles: tiles.length,
-      });
+      await flushWalkStats(uid, { distanceM: sessionDistance, steps: sessionSteps });
     } catch (e) {
       console.log('[walkwars] flushWalkStats FAILED', String(e));
     }
@@ -133,21 +118,64 @@ function queueFlush(uid: string) {
   }, FLUSH_MS);
 }
 
-export async function startTracking(
-  uid: string,
-  claimRadius: number,
-  onStats: (s: WalkStats) => void
-): Promise<boolean> {
+export async function startTracking(uid: string, onStats: (s: WalkStats) => void): Promise<boolean> {
   const perm = await ensureLocationPermission();
   if (perm.state !== 'granted') return false;
 
   await stopTracking();
-  pendingTiles.clear();
   sessionDistance = 0;
   sessionSteps = 0;
   sessionPath = [];
+  resetSnap();
+  snapChain = Promise.resolve();
 
   await activateKeepAwakeAsync('walkwars-tracking'); // screen off in pocket suspends GPS callbacks
+
+  const handleFix = async (coords: LatLng, now: number, fixAcc: number | undefined) => {
+    const snapped = await snapPoint(coords);
+    if (lastFix) {
+      const dt = (now - lastFix.ts) / 1000;
+      const dist = haversine(lastFix.coords, snapped);
+      const speed = dist / dt;
+      if (dt > 0 && dist >= MIN_DISTANCE && speed <= MAX_SPEED && speed >= MIN_SPEED) {
+        const steps = Math.max(1, Math.round(dist / 0.76)); // ~0.76m per step
+        sessionDistance += dist;
+        sessionSteps += steps;
+        sessionPath.push(snapped);
+        onStats({
+          distanceM: sessionDistance,
+          steps: sessionSteps,
+          speedMps: speed,
+          lat: snapped.lat,
+          lng: snapped.lng,
+          accuracy: fixAcc,
+          path: [...sessionPath],
+        });
+        lastFix = { coords: snapped, ts: now };
+      } else {
+        onStats({
+          distanceM: sessionDistance,
+          steps: sessionSteps,
+          speedMps: 0,
+          lat: snapped.lat,
+          lng: snapped.lng,
+          accuracy: fixAcc,
+        });
+      }
+    } else {
+      lastFix = { coords: snapped, ts: now };
+      sessionPath = [snapped];
+      onStats({
+        distanceM: 0,
+        steps: 0,
+        speedMps: 0,
+        lat: snapped.lat,
+        lng: snapped.lng,
+        accuracy: fixAcc,
+        path: [...sessionPath],
+      });
+    }
+  };
 
   subscription = await Location.watchPositionAsync(
     {
@@ -156,24 +184,23 @@ export async function startTracking(
       distanceInterval: 0,
     },
     (loc) => {
+      const coords = { lat: loc.coords.latitude, lng: loc.coords.longitude };
+      const fixAcc = loc.coords.accuracy ?? undefined;
       console.log(
         '[walkwars] fix',
         JSON.stringify({
           mocked: loc.mocked,
           acc: Math.round(loc.coords.accuracy ?? -1),
           ageMs: Math.round(Date.now() - loc.timestamp),
-          lat: loc.coords.latitude.toFixed(5),
-          lng: loc.coords.longitude.toFixed(5),
+          lat: coords.lat.toFixed(5),
+          lng: coords.lng.toFixed(5),
         })
       );
-      const coords = { lat: loc.coords.latitude, lng: loc.coords.longitude };
-      const fixAcc = loc.coords.accuracy ?? undefined;
       if (loc.mocked) {
         onStats({
           distanceM: sessionDistance,
           steps: sessionSteps,
           speedMps: 0,
-          claimedTiles: pendingTiles.size,
           lat: coords.lat,
           lng: coords.lng,
           accuracy: fixAcc,
@@ -182,69 +209,32 @@ export async function startTracking(
         return;
       }
       if (fixAcc != null && fixAcc > 300) {
-        // GPS still settling / bad fix — don't jump the dot or claim from it.
+        // GPS still settling / bad fix — don't jump the dot or extend the trail.
         onStats({
           distanceM: sessionDistance,
           steps: sessionSteps,
           speedMps: 0,
-          claimedTiles: pendingTiles.size,
+          lat: coords.lat,
+          lng: coords.lng,
+          accuracy: fixAcc,
         });
         return;
       }
       const now = loc.timestamp;
-      if (lastFix) {
-        const dt = (now - lastFix.ts) / 1000;
-        const dist = haversine(lastFix.coords, coords);
-        const speed = dist / dt;
-        if (dt > 0 && dist >= MIN_DISTANCE && speed <= MAX_SPEED && speed >= MIN_SPEED) {
-          const steps = Math.max(1, Math.round(dist / 0.76)); // ~0.76m per step
-          const pts: LatLng[] = [];
-          const n = Math.max(1, Math.ceil(dist / SAMPLE_STEP));
-          for (let i = 0; i <= n; i++) pts.push(lerp(lastFix.coords, coords, i / n));
-          for (const p of pts) {
-            for (const t of tilesInRadius(p, claimRadius)) {
-              pendingTiles.set(t.key, t);
-            }
-          }
-          sessionDistance += dist;
-          sessionSteps += steps;
-          sessionPath.push(coords);
-          onStats({
-            distanceM: sessionDistance,
-            steps: sessionSteps,
-            speedMps: speed,
-            claimedTiles: pendingTiles.size,
-            lat: coords.lat,
-            lng: coords.lng,
-            accuracy: fixAcc,
-            path: [...sessionPath],
-          });
-          lastFix = { coords, ts: now };
-        } else {
+      // Chain snaps so fixes are applied in order (snapPoint is network-bound).
+      snapChain = snapChain
+        .then(() => handleFix(coords, now, fixAcc))
+        .catch((e) => {
+          console.log('[walkwars] handleFix FAILED', String(e));
           onStats({
             distanceM: sessionDistance,
             steps: sessionSteps,
             speedMps: 0,
-            claimedTiles: pendingTiles.size,
             lat: coords.lat,
             lng: coords.lng,
             accuracy: fixAcc,
           });
-        }
-      } else {
-        lastFix = { coords, ts: now };
-        sessionPath = [coords];
-        onStats({
-          distanceM: 0,
-          steps: 0,
-          speedMps: 0,
-          claimedTiles: 0,
-          lat: coords.lat,
-          lng: coords.lng,
-          accuracy: fixAcc,
-          path: [...sessionPath],
         });
-      }
     }
   );
 
@@ -264,4 +254,6 @@ export async function stopTracking(): Promise<void> {
   }
   lastFix = null;
   sessionPath = [];
+  resetSnap();
+  snapChain = Promise.resolve();
 }

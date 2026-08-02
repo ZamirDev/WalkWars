@@ -14,12 +14,14 @@ export interface WalkUser {
   isPro: boolean;
 }
 
-export interface TileDoc {
-  strengths: Record<string, number>;
-  gh6: string;
-  lat: number;
-  lng: number;
-  updatedAt: number;
+export interface TerritoryDoc {
+  id: string;
+  ownerId: string;
+  ring: LatLng[];
+  center: LatLng;
+  gh5: string;
+  areaM2: number;
+  createdAt: number;
 }
 
 export interface TerritoryPolygon {
@@ -32,7 +34,6 @@ export interface WalkStats {
   distanceM: number;
   steps: number;
   speedMps: number;
-  claimedTiles: number;
   lat?: number;
   lng?: number;
   accuracy?: number;
