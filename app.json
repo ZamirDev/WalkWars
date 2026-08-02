@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "walkwars",
+    "name": "WalkWars",
     "slug": "walkwars",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -31,6 +31,13 @@
           "backgroundColor": "#208AEF",
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "WalkWars uses your location to claim territory while you walk.",
+          "locationAlwaysAndWhenInUsePermission": "WalkWars uses your location to claim territory while you walk."
         }
       ]
     ],

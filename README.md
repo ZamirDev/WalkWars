@@ -1,56 +1,60 @@
-# Welcome to your Expo app 👋
+# WalkWars
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Walk. Claim. Conquer the streets.
 
-## Get started
+A territory-conquest fitness game: walk in the real world to claim map tiles as your own. Walk over someone else's tiles to steal them. Territory is color-coded live on an OpenStreetMap map.
 
-1. Install dependencies
+Built for **Shipaton 2026** (RevenueCat's global mobile hackathon) with React Native + Expo.
 
-   ```bash
-   npm install
-   ```
+## How it works
 
-2. Start the app
+- **Claim** — every GPS fix (speed-filtered to ≤8 m/s so vehicles can't cheat) marks tiles within your claim radius as yours. Walking adds strength to your claim.
+- **Steal** — walking over another player's tiles adds your strength against theirs; whoever has the most strength owns the tile.
+- **Decay** — unvisited territory weakens over time (Pro stops decay).
+- **Fitness** — steps, distance, and speed tracked from the same walk. Walking is the whole game.
 
-   ```bash
-   npx expo start
-   ```
+## Screens
 
-In the output, you'll find options to open the app in a
+| Route | Screen |
+| --- | --- |
+| `/` | Live map + walk HUD (start/stop walking, live stats) |
+| `/auth` | Sign up / sign in / guest entry |
+| `/leaderboard` | Territory score ranking |
+| `/profile` | Stats, Pro upsell, sign out |
+| `/paywall` | Free vs Pro comparison (RevenueCat subscription — integrated in store build) |
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+## Stack
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+- **Expo SDK 57** + React Native (TypeScript)
+- **Map:** custom `WebView` + Leaflet over OpenStreetMap tiles (free, no API key)
+- **Backend:** Firebase (Auth + Firestore) — anonymous + email/password auth; tiles/users/leaderboard in Firestore
+- **Anti-cheat:** speed filter (8 m/s max), mock-location rejection (`loc.mocked`), tile claim radius
+- **Monetization (planned):** RevenueCat Pro subscription — 2× claim radius, no tile cap, no decay
 
-## Get a fresh project
+## Setup
 
-When you're ready, run:
+1. `npm install`
+2. Create a Firebase project (see `src/lib/firebase.config.ts`) and paste your web-app config.
+   - Enable **Email/Password** + **Anonymous** sign-in (Build → Authentication → Sign-in method).
+   - Enable **Firestore Database** and publish the rules in `firestore.rules`.
+3. `npm run android` (or `npx expo start` and open in Expo Go on your phone).
 
-```bash
-npm run reset-project
+## Architecture
+
+```
+src/
+  app/            expo-router screens
+  components/     LeafletMap (WebView + Leaflet bridge)
+  lib/
+    geo.ts        tile grid, haversine, geohash
+    location.ts   GPS tracking + speed filter + claim engine
+    db.ts         Firestore data layer (users/tiles/leaderboard)
+    firebase.ts   Firebase init + auth helpers
+    auth-context.tsx  auth provider
+    colors.ts     territory color assignment
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+## Shipaton notes
 
-### Other setup steps
-
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
-
-## Learn more
-
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+- Ship Kit milestones: Registration ✅ · RevenueCat project ✅ · first test purchase (in progress) → store API call → first real purchase.
+- Winner path: Shipaton regular track (Google Play launch) or Next Gen Award (video + open-source code) — this repo is the open-source half.
