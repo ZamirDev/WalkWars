@@ -4,8 +4,8 @@ import { haversine, lerp, tilesInRadius, type LatLng, type TilePoint } from './g
 import type { WalkStats } from './types';
 
 const MAX_SPEED = 8; // m/s — faster than any runner
-const MIN_SPEED = 0.4; // m/s — ignore stationary jitter
-const MIN_DISTANCE = 3; // m between accepted fixes
+const MIN_SPEED = 0.05; // m/s — ignore near-static jitter (kept tiny so indoor walks count)
+const MIN_DISTANCE = 1; // m between accepted fixes
 const SAMPLE_STEP = 10; // m between claim sample points along a segment
 const FLUSH_MS = 30000;
 
@@ -22,36 +22,68 @@ export async function requestLocationPermission(): Promise<boolean> {
   return status === 'granted';
 }
 
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('location timeout')), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      }
+    );
+  });
+}
+
 export async function getCurrentPosition(): Promise<LatLng | null> {
-  try {
-    const loc = await Location.getCurrentPositionAsync({
-      accuracy: Location.Accuracy.High,
+  for (const accuracy of [Location.Accuracy.High, Location.Accuracy.Balanced]) {
+    try {
+      const loc = await withTimeout(
+        Location.getCurrentPositionAsync({ accuracy, mayShowUserSettingsDialog: true }),
+        8000
+      );
+      if (loc.mocked) continue; // Android mock-location detection
+      if (loc.coords.latitude !== 0 && loc.coords.longitude !== 0) {
+        return {
+          lat: loc.coords.latitude,
+          lng: loc.coords.longitude,
+          accuracy: loc.coords.accuracy ?? undefined,
+        };
+      }
+    } catch (e) {
+      console.log('[walkwars] getCurrentPosition failed', accuracy, String(e));
+    }
+  }
+  return null;
+}
+
+/** Flush pending tile claims + walk stats right now (called on stop). */
+export async function flushNow(uid: string): Promise<void> {
+  const tiles = [...pendingTiles.values()];
+  pendingTiles.clear();
+  if (tiles.length > 0) {
+    await claimTiles(uid, tiles).catch(() => {
+      tiles.forEach((t) => pendingTiles.set(t.key, t));
     });
-    return { lat: loc.coords.latitude, lng: loc.coords.longitude };
-  } catch {
-    return null;
+  }
+  if (sessionDistance > 0) {
+    await flushWalkStats(uid, {
+      distanceM: sessionDistance,
+      steps: sessionSteps,
+      newTiles: tiles.length,
+    }).catch(() => {});
+    sessionDistance = 0;
+    sessionSteps = 0;
   }
 }
 
 function queueFlush(uid: string) {
   if (flushTimer) return;
-  flushTimer = setInterval(async () => {
-    const tiles = [...pendingTiles.values()];
-    pendingTiles.clear();
-    if (tiles.length > 0) {
-      await claimTiles(uid, tiles).catch(() => {
-        tiles.forEach((t) => pendingTiles.set(t.key, t));
-      });
-    }
-    if (sessionDistance > 0) {
-      await flushWalkStats(uid, {
-        distanceM: sessionDistance,
-        steps: sessionSteps,
-        newTiles: tiles.length,
-      }).catch(() => {});
-      sessionDistance = 0;
-      sessionSteps = 0;
-    }
+  flushTimer = setInterval(() => {
+    void flushNow(uid);
   }, FLUSH_MS);
 }
 
@@ -69,13 +101,36 @@ export async function startTracking(
 
   subscription = await Location.watchPositionAsync(
     {
-      accuracy: Location.Accuracy.Highest,
-      distanceInterval: 5,
-      timeInterval: 3000,
+      accuracy: Location.Accuracy.Balanced,
+      timeInterval: 2000,
+      distanceInterval: 0,
     },
     (loc) => {
-      if (loc.mocked) return; // Android mock-location detection
+      console.log(
+        '[walkwars] fix',
+        JSON.stringify({
+          mocked: loc.mocked,
+          acc: Math.round(loc.coords.accuracy ?? -1),
+          ageMs: Math.round(Date.now() - loc.timestamp),
+          lat: loc.coords.latitude.toFixed(5),
+          lng: loc.coords.longitude.toFixed(5),
+        })
+      );
       const coords = { lat: loc.coords.latitude, lng: loc.coords.longitude };
+      const fixAcc = loc.coords.accuracy ?? undefined;
+      if (loc.mocked) {
+        onStats({
+          distanceM: sessionDistance,
+          steps: sessionSteps,
+          speedMps: 0,
+          claimedTiles: pendingTiles.size,
+          lat: coords.lat,
+          lng: coords.lng,
+          accuracy: fixAcc,
+          mocked: true,
+        });
+        return;
+      }
       const now = loc.timestamp;
       if (lastFix) {
         const dt = (now - lastFix.ts) / 1000;
@@ -93,11 +148,38 @@ export async function startTracking(
           }
           sessionDistance += dist;
           sessionSteps += steps;
-          onStats({ distanceM: sessionDistance, steps: sessionSteps, speedMps: speed, claimedTiles: pendingTiles.size, lat: coords.lat, lng: coords.lng });
+          onStats({
+            distanceM: sessionDistance,
+            steps: sessionSteps,
+            speedMps: speed,
+            claimedTiles: pendingTiles.size,
+            lat: coords.lat,
+            lng: coords.lng,
+            accuracy: fixAcc,
+          });
           lastFix = { coords, ts: now };
+        } else {
+          onStats({
+            distanceM: sessionDistance,
+            steps: sessionSteps,
+            speedMps: 0,
+            claimedTiles: pendingTiles.size,
+            lat: coords.lat,
+            lng: coords.lng,
+            accuracy: fixAcc,
+          });
         }
       } else {
         lastFix = { coords, ts: now };
+        onStats({
+          distanceM: 0,
+          steps: 0,
+          speedMps: 0,
+          claimedTiles: 0,
+          lat: coords.lat,
+          lng: coords.lng,
+          accuracy: fixAcc,
+        });
       }
     }
   );

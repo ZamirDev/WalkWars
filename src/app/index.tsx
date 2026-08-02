@@ -7,7 +7,7 @@ import { useAuth } from '@/lib/auth-context';
 import { colorForOwner } from '@/lib/colors';
 import { queryTilesInArea } from '@/lib/db';
 import { tileRing, type LatLng } from '@/lib/geo';
-import { getCurrentPosition, requestLocationPermission, startTracking, stopTracking } from '@/lib/location';
+import { flushNow, getCurrentPosition, startTracking, stopTracking } from '@/lib/location';
 import type { TerritoryPolygon, WalkStats } from '@/lib/types';
 
 const FREE_RADIUS = 15;
@@ -23,6 +23,12 @@ export default function MapScreen() {
   const [tracking, setTracking] = useState(false);
   const [polygons, setPolygons] = useState<TerritoryPolygon[]>([]);
   const [loadingTiles, setLoadingTiles] = useState(false);
+  const [noFix, setNoFix] = useState(false);
+  const [locating, setLocating] = useState(false);
+  const [followOn, setFollowOn] = useState(false);
+  const locatingRef = useRef(false);
+  const followOnRef = useRef(false);
+  const moveGuard = useRef(0);
 
   const mapRef = useRef<LeafletMapHandle | null>(null);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -71,60 +77,113 @@ export default function MapScreen() {
     [refreshTerritory]
   );
 
-  async function startSession() {
-    if (!firebaseUser) return;
-    let pos = await getCurrentPosition();
-    if (!pos && (await requestLocationPermission())) pos = await getCurrentPosition();
-    if (!pos) return;
-    setPosition(pos);
-    mapRef.current?.center(pos.lat, pos.lng);
-    scheduleRefresh(pos.lat, pos.lng);
-    const ok = await startTracking(firebaseUser.uid, claimRadius, (s) => {
+  const handleStats = useCallback(
+    (s: WalkStats) => {
       setStats(s);
       if (s.lat != null && s.lng != null) {
-        setPosition({ lat: s.lat, lng: s.lng });
+        setPosition({ lat: s.lat, lng: s.lng, accuracy: s.accuracy });
         mapRef.current?.setUser(s.lat, s.lng, claimRadius);
+        if (!s.mocked) scheduleRefresh(s.lat, s.lng);
+        if (followOnRef.current && !s.mocked) {
+          moveGuard.current = 1;
+          mapRef.current?.center(s.lat, s.lng);
+        }
       }
-    });
-    setTracking(ok);
-  }
+    },
+    [claimRadius, scheduleRefresh]
+  );
 
-  async function stopSession() {
-    await stopTracking();
-    setTracking(false);
-  }
+  const toggleFollow = useCallback(() => {
+    setFollowOn((prev) => {
+      const next = !prev;
+      followOnRef.current = next;
+      if (next && position) {
+        moveGuard.current = 1;
+        mapRef.current?.center(position.lat, position.lng);
+      }
+      return next;
+    });
+  }, [position]);
+
+  const locate = useCallback(async () => {
+    if (locatingRef.current) return;
+    locatingRef.current = true;
+    setLocating(true);
+    try {
+      let pos = await getCurrentPosition();
+      if (pos) {
+        setNoFix(false);
+        setPosition(pos);
+        mapRef.current?.center(pos.lat, pos.lng);
+        mapRef.current?.setUser(pos.lat, pos.lng, claimRadius);
+        scheduleRefresh(pos.lat, pos.lng);
+      } else {
+        setNoFix(true);
+      }
+    } finally {
+      locatingRef.current = false;
+      setLocating(false);
+    }
+  }, [claimRadius, scheduleRefresh]);
 
   useEffect(() => {
     if (!firebaseUser) return;
     let cancelled = false;
     (async () => {
       let pos = await getCurrentPosition();
-      if (!pos && (await requestLocationPermission())) pos = await getCurrentPosition();
-      if (cancelled || !pos) return;
+      if (cancelled) return;
+      if (!pos) {
+        setNoFix(true);
+        return;
+      }
+      setNoFix(false);
       setPosition(pos);
       mapRef.current?.center(pos.lat, pos.lng);
+      mapRef.current?.setUser(pos.lat, pos.lng, claimRadius);
       scheduleRefresh(pos.lat, pos.lng);
-      const ok = await startTracking(firebaseUser.uid, claimRadius, (s) => {
-        setStats(s);
-        if (s.lat != null && s.lng != null) {
-          setPosition({ lat: s.lat, lng: s.lng });
-          mapRef.current?.setUser(s.lat, s.lng, claimRadius);
-        }
-      });
-      setTracking(ok);
     })();
     return () => {
-      if (refreshTimer.current) clearTimeout(refreshTimer.current);
-      stopTracking();
-      setTracking(false);
+      cancelled = true;
     };
   }, [firebaseUser, claimRadius, scheduleRefresh]);
 
+  useEffect(() => {
+    followOnRef.current = followOn;
+  }, [followOn]);
+
+  useEffect(() => {
+    return () => {
+      if (refreshTimer.current) clearTimeout(refreshTimer.current);
+      stopTracking();
+    };
+  }, []);
+
+  async function startSession() {
+    if (!firebaseUser) return;
+    await locate();
+    const ok = await startTracking(firebaseUser.uid, claimRadius, handleStats);
+    setTracking(ok);
+    if (!ok) setNoFix(true);
+  }
+
+  async function stopSession() {
+    if (firebaseUser) await flushNow(firebaseUser.uid);
+    await stopTracking();
+    setTracking(false);
+  }
+
   function onMapMove(lat: number, lng: number) {
+    if (moveGuard.current > 0) {
+      moveGuard.current = 0;
+      return;
+    }
+    if (followOnRef.current && tracking) setFollowOn(false);
     if (!tracking) scheduleRefresh(lat, lng);
   }
 
   const km = stats ? (stats.distanceM / 1000).toFixed(2) : '0.00';
+  const showMock = stats?.mocked === true;
+  const fixAcc = stats?.accuracy ?? position?.accuracy ?? null;
 
   return (
     <View style={styles.container}>
@@ -148,9 +207,41 @@ export default function MapScreen() {
             </Pressable>
           </View>
         </View>
-        {loadingTiles && (
-          <View style={styles.loadingBadge}>
-            <ActivityIndicator size="small" color="#2563eb" />
+        <View style={styles.locateRow}>
+          <Pressable style={styles.locatePill} onPress={locate}>
+            {locating ? (
+              <ActivityIndicator size="small" color="#2563eb" />
+            ) : (
+              <Text style={styles.locatePillText}>Locate me</Text>
+            )}
+          </Pressable>
+          <Pressable
+            style={[styles.locatePill, followOn && styles.followPillActive]}
+            onPress={toggleFollow}>
+            <Text style={[styles.locatePillText, followOn && styles.followPillTextActive]}>
+              {followOn ? 'Following' : 'Follow'}
+            </Text>
+          </Pressable>
+        </View>
+        {(loadingTiles || noFix || showMock) && (
+          <View style={styles.badgeRow}>
+            {loadingTiles && (
+              <View style={styles.loadingBadge}>
+                <ActivityIndicator size="small" color="#2563eb" />
+              </View>
+            )}
+            {noFix && (
+              <View style={styles.warnBanner}>
+                <Text style={styles.warnText}>
+                  Location unavailable — enable High accuracy mode, go near a window, or press Locate to retry.
+                </Text>
+              </View>
+            )}
+            {showMock && (
+              <View style={styles.warnBanner}>
+                <Text style={styles.warnText}>Mock location detected — claims paused</Text>
+              </View>
+            )}
           </View>
         )}
       </SafeAreaView>
@@ -162,6 +253,9 @@ export default function MapScreen() {
           <Stat label="Speed" value={stats ? `${stats.speedMps.toFixed(1)} m/s` : '—'} />
           <Stat label="Claimed" value={String(stats?.claimedTiles ?? 0)} />
         </View>
+        {fixAcc != null && (
+          <Text style={styles.accText}>Fix accuracy: ±{Math.round(fixAcc)} m</Text>
+        )}
         <Pressable
           style={[styles.bigButton, tracking ? styles.bigButtonStop : styles.bigButtonStart]}
           onPress={tracking ? stopSession : startSession}>
@@ -201,12 +295,40 @@ const styles = StyleSheet.create({
     borderRadius: 20,
   },
   topButtonText: { fontSize: 13, fontWeight: '600', color: '#2563eb' },
+  locateRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8, marginTop: 2 },
+  locatePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.95)',
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 3,
+  },
+  locatePillText: { fontSize: 13, fontWeight: '700', color: '#2563eb' },
+  followPillActive: { backgroundColor: '#2563eb', borderColor: '#2563eb' },
+  followPillTextActive: { color: '#ffffff' },
+  badgeRow: { gap: 6 },
   loadingBadge: {
     alignSelf: 'flex-start',
     backgroundColor: 'rgba(255,255,255,0.9)',
     borderRadius: 16,
     padding: 6,
   },
+  warnBanner: {
+    backgroundColor: 'rgba(255,236,179,0.95)',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  warnText: { fontSize: 12, fontWeight: '600', color: '#92400e' },
   bottomBar: { position: 'absolute', bottom: 0, left: 0, right: 0, alignItems: 'center', gap: 12 },
   statsPanel: {
     flexDirection: 'row',
@@ -220,6 +342,15 @@ const styles = StyleSheet.create({
   stat: { alignItems: 'center' },
   statValue: { fontSize: 16, fontWeight: '800', color: '#0f172a' },
   statLabel: { fontSize: 11, color: '#64748b', marginTop: 2 },
+  accText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#334155',
+    backgroundColor: 'rgba(255,255,255,0.85)',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
   bigButton: {
     width: 140,
     height: 140,

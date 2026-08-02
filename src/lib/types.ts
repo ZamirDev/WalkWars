@@ -33,4 +33,6 @@ export interface WalkStats {
   claimedTiles: number;
   lat?: number;
   lng?: number;
+  accuracy?: number;
+  mocked?: boolean;
 }

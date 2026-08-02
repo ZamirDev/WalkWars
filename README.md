@@ -25,7 +25,7 @@ Built for **Shipaton 2026** (RevenueCat's global mobile hackathon) with React Na
 
 ## Stack
 
-- **Expo SDK 57** + React Native (TypeScript)
+- **Expo SDK 56** + React Native (TypeScript)
 - **Map:** custom `WebView` + Leaflet over OpenStreetMap tiles (free, no API key)
 - **Backend:** Firebase (Auth + Firestore) — anonymous + email/password auth; tiles/users/leaderboard in Firestore
 - **Anti-cheat:** speed filter (8 m/s max), mock-location rejection (`loc.mocked`), tile claim radius
@@ -34,7 +34,8 @@ Built for **Shipaton 2026** (RevenueCat's global mobile hackathon) with React Na
 ## Setup
 
 1. `npm install`
-2. Create a Firebase project (see `src/lib/firebase.config.ts`) and paste your web-app config.
+2. `cp .env.example .env` and fill in your Firebase project values (from Project Settings → General → Your apps → the web app).
+   - Create a Firebase project at https://console.firebase.google.com, add a **Web app**, and copy its config into `.env` (see `src/lib/firebase.config.ts`).
    - Enable **Email/Password** + **Anonymous** sign-in (Build → Authentication → Sign-in method).
    - Enable **Firestore Database** and publish the rules in `firestore.rules`.
 3. `npm run android` (or `npx expo start` and open in Expo Go on your phone).

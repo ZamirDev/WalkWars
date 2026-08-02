@@ -1,6 +1,7 @@
 export interface LatLng {
   lat: number;
   lng: number;
+  accuracy?: number;
 }
 
 export interface TilePoint {

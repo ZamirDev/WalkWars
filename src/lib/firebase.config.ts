@@ -1,18 +1,12 @@
-// Paste your Firebase web app config here.
-// Steps:
-//   1. Go to https://console.firebase.google.com and create a project (e.g. "walkwars").
-//   2. Add a Web app (</>) from Project Settings > General.
-//   3. Copy the firebaseConfig object below.
-//   4. In Build > Authentication > Sign-in method, enable:
-//        - Email/Password
-//        - Anonymous
-//   5. In Build > Firestore Database > Rules, paste the rules from /firestore.rules.
+// Firebase web config loaded from local environment variables (.env — gitignored).
+// Copy .env.example to .env and fill in your own Firebase project values.
+// The API key is public by design; it must be present at build time.
 export const firebaseConfig = {
-  apiKey: 'AIzaSyD5CLww51vCywfWdEZQS0Ij4ry6iQBCw4o',
-  authDomain: 'walkwars-bee7b.firebaseapp.com',
-  projectId: 'walkwars-bee7b',
-  storageBucket: 'walkwars-bee7b.firebasestorage.app',
-  messagingSenderId: '278296507278',
-  appId: '1:278296507278:web:5e3eeb26f581a58cf0eadf',
-  measurementId: 'G-V3JXLJ9D96',
+  apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY ?? '',
+  authDomain: process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN ?? '',
+  projectId: process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID ?? '',
+  storageBucket: process.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET ?? '',
+  messagingSenderId: process.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID ?? '',
+  appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID ?? '',
+  measurementId: process.env.EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID ?? '',
 };
