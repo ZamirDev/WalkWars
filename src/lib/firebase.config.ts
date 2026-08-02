@@ -8,10 +8,11 @@
 //        - Anonymous
 //   5. In Build > Firestore Database > Rules, paste the rules from /firestore.rules.
 export const firebaseConfig = {
-  apiKey: 'PASTE_API_KEY',
-  authDomain: 'PASTE_PROJECT.firebaseapp.com',
-  projectId: 'PASTE_PROJECT_ID',
-  storageBucket: 'PASTE_PROJECT.appspot.com',
-  messagingSenderId: 'PASTE_SENDER_ID',
-  appId: 'PASTE_APP_ID',
+  apiKey: 'AIzaSyD5CLww51vCywfWdEZQS0Ij4ry6iQBCw4o',
+  authDomain: 'walkwars-bee7b.firebaseapp.com',
+  projectId: 'walkwars-bee7b',
+  storageBucket: 'walkwars-bee7b.firebasestorage.app',
+  messagingSenderId: '278296507278',
+  appId: '1:278296507278:web:5e3eeb26f581a58cf0eadf',
+  measurementId: 'G-V3JXLJ9D96',
 };
