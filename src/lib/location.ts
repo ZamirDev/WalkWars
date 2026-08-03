@@ -1,5 +1,6 @@
 import * as Location from 'expo-location';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import { Pedometer } from 'expo-sensors';
 import { flushWalkStats } from './db';
 import { haversine, type LatLng } from './geo';
 import { resetSnap, snapPoint } from './snap';
@@ -18,6 +19,11 @@ let sessionSteps = 0;
 let sessionPath: LatLng[] = [];
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let snapChain: Promise<void> = Promise.resolve();
+
+let pedometerSub: ReturnType<typeof Pedometer.watchStepCount> | null = null;
+let pedometerActive = false;
+let pedometerBaseline: number | null = null;
+let lastCoords: { lat: number; lng: number; accuracy?: number; heading?: number } | null = null;
 
 export type LocationPermissionState =
   | { state: 'granted' }
@@ -118,6 +124,23 @@ function queueFlush(uid: string) {
   }, FLUSH_MS);
 }
 
+let stepPushTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Throttled live steps update so the counter moves between GPS fixes. */
+function pushStepStats(onStats: (s: WalkStats) => void, mocked = false) {
+  if (stepPushTimer) return;
+  stepPushTimer = setTimeout(() => {
+    stepPushTimer = null;
+    onStats({
+      distanceM: sessionDistance,
+      steps: sessionSteps,
+      speedMps: 0,
+      ...(lastCoords ? { lat: lastCoords.lat, lng: lastCoords.lng, accuracy: lastCoords.accuracy } : {}),
+      mocked,
+    });
+  }, 1000);
+}
+
 export async function startTracking(uid: string, onStats: (s: WalkStats) => void): Promise<boolean> {
   const perm = await ensureLocationPermission();
   if (perm.state !== 'granted') return false;
@@ -126,19 +149,52 @@ export async function startTracking(uid: string, onStats: (s: WalkStats) => void
   sessionDistance = 0;
   sessionSteps = 0;
   sessionPath = [];
+  lastCoords = null;
   resetSnap();
   snapChain = Promise.resolve();
 
+  // Real hardware step counting (Android TYPE_STEP_COUNTER). Falls back to the
+  // GPS distance / 0.76m heuristic when the sensor or permission is missing.
+  pedometerActive = false;
+  pedometerBaseline = null;
+  try {
+    if (await Pedometer.isAvailableAsync()) {
+      const permRes = await Pedometer.requestPermissionsAsync();
+      if (permRes.granted) {
+        pedometerActive = true;
+        pedometerSub = Pedometer.watchStepCount((result) => {
+          if (pedometerBaseline == null) {
+            pedometerBaseline = result.steps;
+            return;
+          }
+          const delta = Math.max(0, result.steps - pedometerBaseline);
+          pedometerBaseline = result.steps;
+          if (delta > 0) {
+            sessionSteps += delta;
+            pushStepStats(onStats);
+          }
+        });
+        console.log('[walkwars] pedometer active');
+      }
+    }
+  } catch (e) {
+    console.log('[walkwars] pedometer init FAILED', String(e));
+    pedometerActive = false;
+  }
+
   await activateKeepAwakeAsync('walkwars-tracking'); // screen off in pocket suspends GPS callbacks
 
-  const handleFix = async (coords: LatLng, now: number, fixAcc: number | undefined) => {
+  const handleFix = async (coords: LatLng, now: number, fixAcc: number | undefined, heading?: number) => {
     const snapped = await snapPoint(coords);
+    lastCoords = { lat: snapped.lat, lng: snapped.lng, accuracy: fixAcc, heading };
     if (lastFix) {
       const dt = (now - lastFix.ts) / 1000;
       const dist = haversine(lastFix.coords, snapped);
       const speed = dist / dt;
       if (dt > 0 && dist >= MIN_DISTANCE && speed <= MAX_SPEED && speed >= MIN_SPEED) {
-        const steps = Math.max(1, Math.round(dist / 0.76)); // ~0.76m per step
+        // Hardware pedometer is authoritative when active; otherwise fall back
+        // to a GPS distance estimate (~0.76m per step).
+        const steps = pedometerActive ? 0 : Math.max(1, Math.round(dist / 0.76));
         sessionDistance += dist;
         sessionSteps += steps;
         sessionPath.push(snapped);
@@ -149,6 +205,7 @@ export async function startTracking(uid: string, onStats: (s: WalkStats) => void
           lat: snapped.lat,
           lng: snapped.lng,
           accuracy: fixAcc,
+          heading,
           path: [...sessionPath],
         });
         lastFix = { coords: snapped, ts: now };
@@ -160,6 +217,7 @@ export async function startTracking(uid: string, onStats: (s: WalkStats) => void
           lat: snapped.lat,
           lng: snapped.lng,
           accuracy: fixAcc,
+          heading,
         });
       }
     } else {
@@ -172,6 +230,7 @@ export async function startTracking(uid: string, onStats: (s: WalkStats) => void
         lat: snapped.lat,
         lng: snapped.lng,
         accuracy: fixAcc,
+        heading,
         path: [...sessionPath],
       });
     }
@@ -223,7 +282,7 @@ export async function startTracking(uid: string, onStats: (s: WalkStats) => void
       const now = loc.timestamp;
       // Chain snaps so fixes are applied in order (snapPoint is network-bound).
       snapChain = snapChain
-        .then(() => handleFix(coords, now, fixAcc))
+        .then(() => handleFix(coords, now, fixAcc, loc.coords.heading ?? undefined))
         .catch((e) => {
           console.log('[walkwars] handleFix FAILED', String(e));
           onStats({
@@ -244,6 +303,17 @@ export async function startTracking(uid: string, onStats: (s: WalkStats) => void
 
 export async function stopTracking(): Promise<void> {
   deactivateKeepAwake('walkwars-tracking');
+  if (pedometerSub) {
+    pedometerSub.remove();
+    pedometerSub = null;
+  }
+  pedometerActive = false;
+  pedometerBaseline = null;
+  lastCoords = null;
+  if (stepPushTimer) {
+    clearTimeout(stepPushTimer);
+    stepPushTimer = null;
+  }
   if (subscription) {
     subscription.remove();
     subscription = null;

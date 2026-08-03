@@ -5,12 +5,14 @@ import {
   getDocs,
   increment,
   limit,
+  onSnapshot,
   orderBy,
   query,
   setDoc,
   updateDoc,
   where,
   writeBatch,
+  type Unsubscribe,
 } from 'firebase/firestore';
 import { db } from './firebase';
 import {
@@ -65,7 +67,11 @@ export async function touchUser(uid: string): Promise<void> {
  * territory owned by someone else that the new ring overlaps is deleted and
  * its area is deducted from the previous owner's score.
  */
-export async function createTerritory(uid: string, ring: LatLng[]): Promise<string | null> {
+export async function createTerritory(
+  uid: string,
+  ring: LatLng[],
+  attackerName = 'Another walker'
+): Promise<string | null> {
   if (ring.length < 3) return null;
   const areaM2 = Math.round(polygonAreaM2(ring));
   if (areaM2 < 10) return null; // degenerate sliver — ignore
@@ -82,7 +88,7 @@ export async function createTerritory(uid: string, ring: LatLng[]): Promise<stri
     createdAt: NOW(),
   });
 
-  await stealOverlapping(uid, ring);
+  await stealOverlapping(uid, ring, attackerName);
 
   await updateDoc(doc(db, 'users', uid), {
     territoryScore: increment(areaM2),
@@ -93,7 +99,7 @@ export async function createTerritory(uid: string, ring: LatLng[]): Promise<stri
 }
 
 /** Delete territories the new ring overlaps that belong to other users. */
-async function stealOverlapping(uid: string, ring: LatLng[]): Promise<void> {
+async function stealOverlapping(uid: string, ring: LatLng[], attackerName: string): Promise<void> {
   const candidates = await queryTerritoriesForTrail(ring);
   const targets = candidates.filter(
     (t) => t.id !== undefined && t.ownerId !== uid && ringsIntersect(ring, t.ring)
@@ -112,6 +118,12 @@ async function stealOverlapping(uid: string, ring: LatLng[]): Promise<void> {
       territoryScore: increment(-loss),
       distinctTiles: increment(-1),
     }).catch(() => {});
+    await notifyUser(
+      ownerId,
+      'territory_lost',
+      `${attackerName} conquered your territory`,
+      `${Math.round(loss).toLocaleString()} m² was taken. Walk it back to reclaim!`
+    ).catch(() => {});
   }
 }
 
@@ -161,4 +173,55 @@ export async function leaderboard(count = 50): Promise<WalkUser[]> {
   const q = query(collection(db, 'users'), orderBy('territoryScore', 'desc'), limit(count));
   const snap = await getDocs(q);
   return snap.docs.map((d) => d.data() as WalkUser);
+}
+
+/** Every territory a user owns, newest first (client-sorted; avoids a composite index). */
+export async function queryMyTerritories(uid: string): Promise<TerritoryDoc[]> {
+  if (!uid) return [];
+  const q = query(collection(db, 'territories'), where('ownerId', '==', uid));
+  const snap = await getDocs(q);
+  const docs = snap.docs.map((d) => ({ ...(d.data() as TerritoryDoc), id: d.id }));
+  return docs.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+export interface AppNotification {
+  id: string;
+  type: string;
+  title: string;
+  body: string;
+  read: boolean;
+  createdAt: number;
+}
+
+/** Push a notification into a user's sub-collection. */
+export async function notifyUser(
+  uid: string,
+  type: string,
+  title: string,
+  body: string
+): Promise<void> {
+  if (!uid) return;
+  const ref = doc(collection(db, 'notifications', uid, 'items'));
+  await setDoc(ref, { type, title, body, read: false, createdAt: NOW() });
+}
+
+/** Live-list a user's notifications (newest first). */
+export function subscribeNotifications(
+  uid: string,
+  cb: (items: AppNotification[]) => void
+): Unsubscribe {
+  const q = query(collection(db, 'notifications', uid, 'items'), orderBy('createdAt', 'desc'), limit(50));
+  return onSnapshot(q, (snap) => {
+    cb(snap.docs.map((d) => ({ ...(d.data() as AppNotification), id: d.id })));
+  });
+}
+
+/** Mark every notification of a user as read. */
+export async function markNotificationsRead(uid: string): Promise<void> {
+  const q = query(collection(db, 'notifications', uid, 'items'), where('read', '==', false));
+  const snap = await getDocs(q);
+  if (snap.empty) return;
+  const batch = writeBatch(db);
+  snap.docs.forEach((d) => batch.update(d.ref, { read: true }));
+  await batch.commit();
 }

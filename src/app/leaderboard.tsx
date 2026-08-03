@@ -4,11 +4,13 @@ import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/lib/auth-context';
 import { leaderboard } from '@/lib/db';
+import { useTheme } from '@/lib/theme';
 import type { WalkUser } from '@/lib/types';
 
 export default function LeaderboardScreen() {
   const router = useRouter();
   const { user } = useAuth();
+  const { scheme, glass } = useTheme();
   const [rows, setRows] = useState<WalkUser[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -22,33 +24,41 @@ export default function LeaderboardScreen() {
     };
   }, [refreshKey]);
 
+  const style = makeStyles(scheme, glass);
+
   return (
-    <SafeAreaView style={styles.safe}>
-      <View style={styles.header}>
+    <SafeAreaView style={style.safe}>
+      <View style={style.header}>
         <Pressable onPress={() => router.back()}>
-          <Text style={styles.back}>‹ Back</Text>
+          <Text style={[style.back, { color: scheme.primary }]}>‹ Back</Text>
         </Pressable>
-        <Text style={styles.title}>Territory Leaderboard</Text>
+        <Text style={[style.title, { color: scheme.onBackground }]}>Territory Leaderboard</Text>
         <Pressable onPress={() => setRefreshKey((k) => k + 1)}>
-          <Text style={styles.back}>Refresh</Text>
+          <Text style={[style.back, { color: scheme.primary }]}>Refresh</Text>
         </Pressable>
       </View>
 
       <FlatList
         data={rows}
         keyExtractor={(r) => r.uid}
-        contentContainerStyle={styles.list}
-        ListEmptyComponent={<Text style={styles.empty}>No conquerors yet. Start walking!</Text>}
+        contentContainerStyle={style.list}
+        ListEmptyComponent={<Text style={[style.empty, { color: scheme.onSurfaceVariant }]}>No conquerors yet. Start walking!</Text>}
         renderItem={({ item, index }) => {
           const isMe = item.uid === user?.uid;
           return (
-            <View style={[styles.row, isMe && styles.rowMe]}>
-              <Text style={styles.rank}>{index + 1}</Text>
-              <View style={styles.nameCol}>
-                <Text style={styles.name}>{item.name}</Text>
-                <Text style={styles.sub}>{item.distinctTiles} territories · {item.totalDistanceKm.toFixed(1)} km</Text>
+            <View
+              style={[
+                style.row,
+                { backgroundColor: glass.panel, borderColor: isMe ? scheme.primary : glass.panelBorder },
+              ]}>
+              <Text style={[style.rank, { color: scheme.onSurfaceVariant }]}>{index + 1}</Text>
+              <View style={style.nameCol}>
+                <Text style={[style.name, { color: scheme.onSurface }]}>{item.name}</Text>
+                <Text style={[style.sub, { color: scheme.onSurfaceVariant }]}>
+                  {item.distinctTiles} territories · {item.totalDistanceKm.toFixed(1)} km
+                </Text>
               </View>
-              <Text style={styles.score}>{item.territoryScore.toLocaleString()} m²</Text>
+              <Text style={[style.score, { color: scheme.primary }]}>{item.territoryScore.toLocaleString()} m²</Text>
             </View>
           );
         }}
@@ -57,25 +67,32 @@ export default function LeaderboardScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#f8fafc' },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12 },
-  back: { color: '#2563eb', fontSize: 15, fontWeight: '600' },
-  title: { fontSize: 18, fontWeight: '800', color: '#0f172a' },
-  list: { paddingHorizontal: 16, paddingBottom: 32, gap: 8 },
-  empty: { textAlign: 'center', color: '#64748b', marginTop: 48 },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 14,
-    padding: 14,
-    gap: 12,
-  },
-  rowMe: { borderWidth: 2, borderColor: '#2563eb' },
-  rank: { width: 28, fontSize: 16, fontWeight: '800', color: '#64748b' },
-  nameCol: { flex: 1 },
-  name: { fontSize: 15, fontWeight: '700', color: '#0f172a' },
-  sub: { fontSize: 12, color: '#64748b', marginTop: 2 },
-  score: { fontSize: 15, fontWeight: '800', color: '#2563eb' },
-});
+function makeStyles(scheme: ReturnType<typeof useTheme>['scheme'], glass: ReturnType<typeof useTheme>['glass']) {
+  return StyleSheet.create({
+    safe: { flex: 1, backgroundColor: scheme.background },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 16,
+      paddingVertical: 12,
+    },
+    back: { fontSize: 15, fontWeight: '600' },
+    title: { fontSize: 18, fontWeight: '800' },
+    list: { paddingHorizontal: 16, paddingBottom: 32, gap: 8 },
+    empty: { textAlign: 'center', marginTop: 48 },
+    row: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      borderRadius: 14,
+      borderWidth: 1,
+      padding: 14,
+      gap: 12,
+    },
+    rank: { width: 28, fontSize: 16, fontWeight: '800' },
+    nameCol: { flex: 1 },
+    name: { fontSize: 15, fontWeight: '700' },
+    sub: { fontSize: 12, marginTop: 2 },
+    score: { fontSize: 15, fontWeight: '800' },
+  });
+}

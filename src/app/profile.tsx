@@ -2,43 +2,48 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/lib/auth-context';
+import { useTheme } from '@/lib/theme';
 
 export default function ProfileScreen() {
   const router = useRouter();
   const { user, signOutUser } = useAuth();
+  const { scheme, glass } = useTheme();
+  const style = makeStyles(scheme, glass);
 
   return (
-    <SafeAreaView style={styles.safe}>
-      <View style={styles.header}>
+    <SafeAreaView style={style.safe}>
+      <View style={style.header}>
         <Pressable onPress={() => router.back()}>
-          <Text style={styles.back}>‹ Back</Text>
+          <Text style={[style.back, { color: scheme.primary }]}>‹ Back</Text>
         </Pressable>
-        <Text style={styles.title}>Profile</Text>
+        <Text style={[style.title, { color: scheme.onBackground }]}>Profile</Text>
         <View style={{ width: 48 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.body}>
-        <Text style={styles.name}>{user?.name ?? 'Walker'}</Text>
-        <Text style={styles.sub}>{user?.email || 'Guest account'}</Text>
+      <ScrollView contentContainerStyle={style.body}>
+        <Text style={[style.name, { color: scheme.onSurface }]}>{user?.name ?? 'Walker'}</Text>
+        <Text style={[style.sub, { color: scheme.onSurfaceVariant }]}>{user?.email || 'Guest account'}</Text>
 
-        <View style={styles.statsCard}>
+        <View style={[style.statsCard, { backgroundColor: glass.panel, borderColor: glass.panelBorder }]}>
           <Metric label="Territory score" value={(user?.territoryScore ?? 0).toLocaleString()} />
           <Metric label="Territories" value={String(user?.distinctTiles ?? 0)} />
           <Metric label="Distance" value={`${(user?.totalDistanceKm ?? 0).toFixed(1)} km`} />
           <Metric label="Steps" value={(user?.totalSteps ?? 0).toLocaleString()} />
         </View>
 
-        <Pressable style={styles.proCard} onPress={() => router.push('/paywall')}>
-          <Text style={styles.proTitle}>{user?.isPro ? 'Pro active' : 'Go Pro'}</Text>
-          <Text style={styles.proText}>
+        <Pressable
+          style={[style.proCard, { backgroundColor: scheme.primary }]}
+          onPress={() => router.push('/paywall')}>
+          <Text style={[style.proTitle, { color: scheme.onPrimary }]}>{user?.isPro ? 'Pro active' : 'Go Pro'}</Text>
+          <Text style={[style.proText, { color: scheme.onPrimary, opacity: 0.85 }]}>
             {user?.isPro
               ? '2× claim radius, background tracking.'
               : '2× claim radius, background tracking — territory perks coming soon.'}
           </Text>
         </Pressable>
 
-        <Pressable style={styles.signout} onPress={() => signOutUser().then(() => router.replace('/auth'))}>
-          <Text style={styles.signoutText}>Sign out</Text>
+        <Pressable style={style.signout} onPress={() => signOutUser().then(() => router.replace('/auth'))}>
+          <Text style={[style.signoutText, { color: scheme.error }]}>Sign out</Text>
         </Pressable>
       </ScrollView>
     </SafeAreaView>
@@ -46,36 +51,48 @@ export default function ProfileScreen() {
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
+  const { scheme } = useTheme();
   return (
     <View style={styles.metric}>
-      <Text style={styles.metricValue}>{value}</Text>
-      <Text style={styles.metricLabel}>{label}</Text>
+      <Text style={[styles.metricValue, { color: scheme.onSurface }]}>{value}</Text>
+      <Text style={[styles.metricLabel, { color: scheme.onSurfaceVariant }]}>{label}</Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#f8fafc' },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12 },
-  back: { color: '#2563eb', fontSize: 15, fontWeight: '600' },
-  title: { fontSize: 18, fontWeight: '800', color: '#0f172a' },
-  body: { padding: 20, gap: 16 },
-  name: { fontSize: 26, fontWeight: '900', color: '#0f172a' },
-  sub: { fontSize: 14, color: '#64748b', marginTop: -8 },
-  statsCard: {
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    padding: 16,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-  },
   metric: { width: '46%', padding: 6 },
-  metricValue: { fontSize: 18, fontWeight: '800', color: '#0f172a' },
-  metricLabel: { fontSize: 12, color: '#64748b', marginTop: 2 },
-  proCard: { backgroundColor: '#2563eb', borderRadius: 18, padding: 18 },
-  proTitle: { color: '#fff', fontSize: 18, fontWeight: '800' },
-  proText: { color: '#dbeafe', fontSize: 14, marginTop: 6, lineHeight: 20 },
-  signout: { marginTop: 8, paddingVertical: 14, alignItems: 'center' },
-  signoutText: { color: '#dc2626', fontWeight: '700', fontSize: 15 },
+  metricValue: { fontSize: 18, fontWeight: '800' },
+  metricLabel: { fontSize: 12, marginTop: 2 },
 });
+
+function makeStyles(scheme: ReturnType<typeof useTheme>['scheme'], glass: ReturnType<typeof useTheme>['glass']) {
+  return StyleSheet.create({
+    safe: { flex: 1, backgroundColor: scheme.background },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 16,
+      paddingVertical: 12,
+    },
+    back: { fontSize: 15, fontWeight: '600' },
+    title: { fontSize: 18, fontWeight: '800' },
+    body: { padding: 20, gap: 16 },
+    name: { fontSize: 26, fontWeight: '900' },
+    sub: { fontSize: 14, marginTop: -8 },
+    statsCard: {
+      borderRadius: 18,
+      borderWidth: 1,
+      padding: 16,
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 12,
+    },
+    proCard: { borderRadius: 18, padding: 18 },
+    proTitle: { fontSize: 18, fontWeight: '800' },
+    proText: { fontSize: 14, marginTop: 6, lineHeight: 20 },
+    signout: { marginTop: 8, paddingVertical: 14, alignItems: 'center' },
+    signoutText: { fontWeight: '700', fontSize: 15 },
+  });
+}

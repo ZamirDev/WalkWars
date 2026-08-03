@@ -37,6 +37,7 @@ export interface WalkStats {
   lat?: number;
   lng?: number;
   accuracy?: number;
+  heading?: number;
   mocked?: boolean;
   path?: LatLng[];
 }

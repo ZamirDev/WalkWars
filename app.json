@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "WalkWars",
+    "name": "TerWalk",
     "slug": "walkwars",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -12,6 +12,11 @@
     },
     "android": {
       "package": "com.zamir.walkwars",
+      "permissions": [
+        "android.permission.ACTIVITY_RECOGNITION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -37,8 +42,8 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "WalkWars uses your location to claim territory while you walk.",
-          "locationAlwaysAndWhenInUsePermission": "WalkWars uses your location to claim territory while you walk."
+          "locationWhenInUsePermission": "TerWalk uses your location to claim territory while you walk.",
+          "locationAlwaysAndWhenInUsePermission": "TerWalk uses your location to claim territory while you walk."
         }
       ],
       "expo-font",
@@ -49,6 +54,13 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "982eddbf-09f9-49a8-bbba-93378d54e9e9"
+      }
+    },
+    "owner": "zamirmemon01"
   }
 }

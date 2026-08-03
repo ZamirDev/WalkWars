@@ -15,9 +15,12 @@ function Boot() {
   return (
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="index" />
+      <Stack.Screen name="map" />
       <Stack.Screen name="leaderboard" />
       <Stack.Screen name="profile" />
       <Stack.Screen name="paywall" />
+      <Stack.Screen name="notifications" />
+      <Stack.Screen name="territories" />
       <Stack.Screen name="auth" />
     </Stack>
   );

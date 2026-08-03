@@ -15,9 +15,10 @@ interface LeafletMapProps {
 }
 
 export interface LeafletMapHandle {
-  setUser: (lat: number, lng: number, radius: number) => void;
+  setUser: (lat: number, lng: number, radius: number, heading?: number) => void;
   center: (lat: number, lng: number) => void;
   fitTo: (pts: LatLng[]) => void;
+  celebrate: (ring: LatLng[]) => void;
 }
 
 const MAP_HTML = `<!DOCTYPE html>
@@ -30,8 +31,10 @@ const MAP_HTML = `<!DOCTYPE html>
 <style>
   html,body,#map{height:100%;margin:0;padding:0;}
   .user-icon{background:transparent;}
-  .user-dot{position:absolute;top:4px;left:4px;width:16px;height:16px;border-radius:50%;background:#2563eb;border:2px solid #fff;box-shadow:0 0 0 2px rgba(37,99,235,0.35);}
-  .user-pulse{position:absolute;top:4px;left:4px;width:16px;height:16px;border-radius:50%;background:rgba(37,99,235,0.45);animation:wwpulse 2s ease-out infinite;}
+  .user-wrap{position:absolute;top:0;left:0;width:24px;height:24px;}
+  .user-arrow{position:absolute;top:5px;left:5px;width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;border-bottom:14px solid #2563eb;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.35));transition:transform .15s ease-out;}
+  .user-ring{position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:rgba(37,99,235,0.18);border:1px solid rgba(37,99,235,0.35);}
+  .user-pulse{position:absolute;top:6px;left:6px;width:12px;height:12px;border-radius:50%;background:rgba(37,99,235,0.45);animation:wwpulse 2s ease-out infinite;}
   @keyframes wwpulse{0%{transform:scale(1);opacity:.8;}100%{transform:scale(3.2);opacity:0;}}
 </style>
 </head>
@@ -48,9 +51,16 @@ const MAP_HTML = `<!DOCTYPE html>
   var userShown = false;
   var userCircle = L.circle([0, 0], { radius: 15, color: '#2563eb', weight: 2, fillColor: '#2563eb', fillOpacity: 0.15, dashArray: '4 4' });
   var userMarker = L.marker([0, 0], {
-    icon: L.divIcon({ className: 'user-icon', html: '<div class="user-pulse"></div><div class="user-dot"></div>', iconSize: [24, 24], iconAnchor: [12, 12] }),
+    icon: L.divIcon({ className: 'user-icon', html: '<div class="user-wrap"><div class="user-ring"></div><div class="user-pulse"></div><div class="user-arrow"></div></div>', iconSize: [24, 24], iconAnchor: [12, 12] }),
     zIndexOffset: 1000
   });
+
+  function setUserHeading(deg) {
+    var el = userMarker.getElement();
+    if (!el) return;
+    var arrow = el.querySelector('.user-arrow');
+    if (arrow && deg != null && isFinite(deg)) arrow.style.transform = 'rotate(' + deg + 'deg)';
+  }
 
   function emitMove() {
     var c = map.getCenter();
@@ -74,12 +84,13 @@ const MAP_HTML = `<!DOCTYPE html>
       userMarker.setLatLng([pos.lat, pos.lng]);
       userCircle.setLatLng([pos.lat, pos.lng]);
       if (pos.radius) userCircle.setRadius(pos.radius);
+      setUserHeading(pos.heading);
       if (!userShown) {
         userShown = true;
         userMarker.addTo(map);
         userCircle.addTo(map);
       }
-      wvLog('setUser ' + pos.lat.toFixed(5) + ',' + pos.lng.toFixed(5));
+      wvLog('setUser ' + pos.lat.toFixed(5) + ',' + pos.lng.toFixed(5) + ' h=' + (pos.heading != null ? Math.round(pos.heading) : '-'));
     },
     setTerritory: function (polygons) {
       layer.clearLayers();
@@ -111,6 +122,23 @@ const MAP_HTML = `<!DOCTYPE html>
         { padding: [48, 48], maxZoom: 16 }
       );
       wvLog('fitBounds ' + pts.length + ' pts z=' + map.getZoom());
+    },
+    celebrateTerritory: function (pos) {
+      var ring = (pos && pos.ring) || [];
+      if (ring.length < 3) return;
+      var pol = L.polygon(ring, { color: '#16a34a', weight: 5, fillColor: '#16a34a', fillOpacity: 0.65 }).addTo(layer);
+      var start = null;
+      function step(ts) {
+        if (!start) start = ts;
+        var t = (ts - start) / 1000;
+        if (t > 2.4) { layer.removeLayer(pol); return; }
+        var f = (t % 0.8) / 0.8;
+        var pulse = Math.sin(Math.PI * f);
+        pol.setStyle({ fillOpacity: 0.25 + 0.45 * pulse, opacity: 0.35 + 0.55 * f, weight: 4 + 8 * pulse });
+        requestAnimationFrame(step);
+      }
+      requestAnimationFrame(step);
+      wvLog('celebrateTerritory ' + ring.length + ' pts');
     }
   };
   window.bridge = bridge;
@@ -140,9 +168,10 @@ export const LeafletMap = forwardRef<LeafletMapHandle, LeafletMapProps>(function
   useImperativeHandle(
     ref,
     () => ({
-      setUser: (lat, lng, radius) => call('setUser', { lat, lng, radius }),
+      setUser: (lat, lng, radius, heading) => call('setUser', { lat, lng, radius, heading }),
       center: (lat, lng) => call('setView', { lat, lng, zoom: 17 }),
       fitTo: (pts) => call('fitBounds', pts),
+      celebrate: (ring) => call('celebrateTerritory', { ring }),
     }),
     [call]
   );
